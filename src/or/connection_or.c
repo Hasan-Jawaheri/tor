@@ -159,8 +159,8 @@ connection_or_set_identity_digest(or_connection_t *conn,
   /* If the identity was set previously, remove the old mapping. */
   if (rsa_id_was_set) {
     connection_or_clear_identity(conn);
-    if (chan)
-      channel_clear_identity_digest(chan);
+    // if (chan)
+    //   channel_clear_identity_digest(chan);
   }
 
   memcpy(conn->identity_digest, rsa_digest, DIGEST_LEN);
@@ -389,7 +389,7 @@ connection_or_change_state(or_connection_t *conn, uint8_t state)
   conn->base_.state = state;
 
   if (conn->chan)
-    channel_tls_handle_state_change_on_orconn(conn->chan, conn,
+    channel_handle_state_change_on_orconn(conn->chan, conn,
                                               old_state, state);
 }
 
@@ -430,6 +430,10 @@ cell_pack(packed_cell_t *dst, const cell_t *src, int wide_circ_ids)
     set_uint16(dest, htons(src->circ_id));
     dest += 2;
   }
+  
+  set_uint32(dest, htonl(src->sequence));
+    dest += 4;
+
   set_uint8(dest, src->command);
   memcpy(dest+1, src->payload, CELL_PAYLOAD_SIZE);
 }
@@ -595,6 +599,10 @@ connection_or_flushed_some(or_connection_t *conn)
 {
   size_t datalen;
 
+	if(get_options()->GlobalSchedulerUSec) {
+    return 0;
+	}
+
   /* Update the channel's active timestamp if there is one */
   if (conn->chan)
     channel_timestamp_active(TLS_CHAN_TO_BASE(conn->chan));
@@ -712,13 +720,15 @@ connection_or_about_to_close(or_connection_t *or_conn)
 
   /* Tell the controlling channel we're closed */
   if (or_conn->chan) {
-    channel_closed(TLS_CHAN_TO_BASE(or_conn->chan));
+	  //IMUX
+	  channel_connection_closing(or_conn->chan, or_conn);
+    //channel_closed(TLS_CHAN_TO_BASE(or_conn->chan));
     /*
      * NULL this out because the channel might hang around a little
      * longer before channel_run_cleanup() gets it.
      */
-    or_conn->chan->conn = NULL;
-    or_conn->chan = NULL;
+    // or_conn->chan->conn = NULL;
+    // or_conn->chan = NULL;
   }
 
   /* Remember why we're closing this connection. */
@@ -1364,10 +1374,12 @@ connection_or_notify_error(or_connection_t *conn,
   /* Tell the controlling channel if we have one */
   if (conn->chan) {
     chan = TLS_CHAN_TO_BASE(conn->chan);
+    //IMUX
+    channel_connection_closing(chan, conn);
     /* Don't transition if we're already in closing, closed or error */
-    if (!CHANNEL_CONDEMNED(chan)) {
-      channel_close_for_error(chan);
-    }
+    // if (!CHANNEL_CONDEMNED(chan)) {
+    //   channel_close_for_error(chan);
+    // }
   }
 
   /* No need to mark for error because connection.c is about to do that */
@@ -1429,7 +1441,9 @@ connection_or_connect, (const tor_addr_t *_addr, uint16_t port,
    * keep the channel up to date.
    */
   conn->chan = chan;
-  chan->conn = conn;
+  //IMUX
+  channel_add_connection(chan, conn);
+
   connection_or_init_conn_from_address(conn, &addr, port, id_digest, ed_id, 1);
 
   /* We have a proper OR connection setup, now check if we can connect to it
@@ -1540,11 +1554,13 @@ connection_or_close_normally(or_connection_t *orconn, int flush)
   if (flush) connection_mark_and_flush_internal(TO_CONN(orconn));
   else connection_mark_for_close_internal(TO_CONN(orconn));
   if (orconn->chan) {
-    chan = TLS_CHAN_TO_BASE(orconn->chan);
-    /* Don't transition if we're already in closing, closed or error */
-    if (!CHANNEL_CONDEMNED(chan)) {
-      channel_close_from_lower_layer(chan);
-    }
+	  //IMUX
+	  channel_connection_closing(orconn->chan, orconn);
+    // chan = TLS_CHAN_TO_BASE(orconn->chan);
+    // /* Don't transition if we're already in closing, closed or error */
+    // if (!CHANNEL_CONDEMNED(chan)) {
+    //   channel_close_from_lower_layer(chan);
+    // }
   }
 }
 
@@ -1563,9 +1579,16 @@ connection_or_close_for_error,(or_connection_t *orconn, int flush))
   if (orconn->chan) {
     chan = TLS_CHAN_TO_BASE(orconn->chan);
     /* Don't transition if we're already in closing, closed or error */
-    if (!CHANNEL_CONDEMNED(chan)) {
-      channel_close_for_error(chan);
+    //IMUX
+    if (!(chan->state == CHANNEL_STATE_CLOSING ||
+             chan->state == CHANNEL_STATE_CLOSED ||
+             chan->state == CHANNEL_STATE_ERROR)) {
+      channel_connection_closing(orconn->chan, orconn);
+      /*channel_close_for_error(chan);*/
     }
+    // if (!CHANNEL_CONDEMNED(chan)) {
+    //   channel_close_for_error(chan);
+    // }
   }
 }
 
@@ -1593,7 +1616,10 @@ connection_tls_start_handshake,(or_connection_t *conn, int receiving))
       chan_listener = channel_tls_start_listener();
       command_setup_listener(chan_listener);
     }
-    chan = channel_tls_handle_incoming(conn);
+    //IMUX
+    channel_type_t type = get_options()->ChannelType;
+    chan = channel_handle_incoming(conn, type);
+
     channel_listener_queue_incoming(chan_listener, chan);
   }
 
@@ -2316,7 +2342,7 @@ connection_or_process_cells_from_inbuf(or_connection_t *conn)
         channel_timestamp_active(TLS_CHAN_TO_BASE(conn->chan));
 
       circuit_build_times_network_is_live(get_circuit_build_times_mutable());
-      channel_tls_handle_var_cell(var_cell, conn);
+      channel_handle_var_cell(var_cell, conn);
       var_cell_free(var_cell);
     } else {
       const int wide_circ_ids = conn->wide_circ_ids;
@@ -2338,7 +2364,7 @@ connection_or_process_cells_from_inbuf(or_connection_t *conn)
        * network-order string) */
       cell_unpack(&cell, buf, wide_circ_ids);
 
-      channel_tls_handle_cell(&cell, conn);
+      channel_handle_cell(&cell, conn);
     }
   }
 }

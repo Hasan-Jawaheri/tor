@@ -1358,3 +1358,27 @@ circuitmux_compare_muxes, (circuitmux_t *cmux_1, circuitmux_t *cmux_2))
   }
 }
 
+#include <float.h>
+or_connection_t *circuitmux_choose_orconn(smartlist_t *orconn_filter) {
+  or_connection_t *chosen = NULL;
+  double chosen_p = DBL_MAX;
+
+  SMARTLIST_FOREACH(orconn_filter, or_connection_t *, orconn, {
+    if(orconn && orconn->chan) {
+      circuitmux_t* next = orconn->chan->cmux;
+      double next_p = DBL_MAX;
+      if (next && next->policy && next->policy->get_next_priority) {
+        next_p = next->policy->get_next_priority(next, next->policy_data);
+      } else {
+        next_p = DBL_MAX;
+      }
+      if(!chosen || next_p < chosen_p) {
+        chosen_p = next_p;
+        chosen = orconn;
+      }
+    }
+  });
+
+  return chosen;
+}
+

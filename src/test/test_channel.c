@@ -479,7 +479,7 @@ test_channel_dumpstats(void *arg)
   p_cell = packed_cell_new();
   test_chan_accept_cells = 1;
   old_count = test_cells_written;
-  channel_write_packed_cell(ch, p_cell);
+  //channel_write_packed_cell(ch, p_cell);
   tt_int_op(test_cells_written, OP_EQ, old_count + 1);
   tt_u64_op(ch->n_bytes_xmitted, OP_GT, 0);
   tt_u64_op(ch->n_cells_xmitted, OP_GT, 0);
@@ -797,7 +797,7 @@ test_channel_lifecycle(void *arg)
   /* Try to write a cell through (should queue) */
   p_cell = packed_cell_new();
   old_count = test_cells_written;
-  channel_write_packed_cell(ch1, p_cell);
+  //channel_write_packed_cell(ch1, p_cell);
   tt_int_op(old_count, OP_EQ, test_cells_written);
 
   /* Move it to OPEN and flush */

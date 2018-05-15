@@ -253,6 +253,7 @@ circuit_set_circid_chan_helper(circuit_t *circ, int direction,
 
   if (chan == NULL)
     return;
+  channel_add_circuit(chan, circ, id);
 
   /* now add the new one to the conn-circid map */
   search.circ_id = id;
@@ -1091,6 +1092,11 @@ circuit_free_(circuit_t *circ)
       or_circuit_t *other = ocirc->rend_splice;
       tor_assert(other->base_.magic == OR_CIRCUIT_MAGIC);
       other->rend_splice = NULL;
+    }
+    
+    /* Remove from channel  (IMUX)*/
+    if(circ->n_chan) {
+      channel_remove_circuit(circ->n_chan, circ->n_circ_id);
     }
 
     /* remove from map. */

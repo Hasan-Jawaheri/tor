@@ -862,11 +862,13 @@ test_channelpadding_negotiation(void *arg)
   memset(&cell, 0, sizeof(cell_t));
   memset(&disable, 0, sizeof(channelpadding_negotiate_t));
   cell.command = CELL_PADDING_NEGOTIATE;
+  
+  circuit_t* circ = circuit_get_by_circid_channel(cell.circ_id, client_relay3);
 
   channelpadding_negotiate_set_command(&disable, CHANNELPADDING_COMMAND_STOP);
   disable.version = 1;
   channelpadding_negotiate_encode(cell.payload, CELL_PAYLOAD_SIZE, &disable);
-  client_relay3->write_cell(client_relay3, &cell);
+  client_relay3->write_cell(client_relay3, &cell, circ);
   tt_assert(relay3_client->padding_enabled);
   tt_int_op(channelpadding_update_padding_for_channel(client_relay3, &disable),
           OP_EQ, -1);
@@ -874,7 +876,7 @@ test_channelpadding_negotiation(void *arg)
 
   disable.version = 0;
   channelpadding_negotiate_encode(cell.payload, CELL_PAYLOAD_SIZE, &disable);
-  client_relay3->write_cell(client_relay3, &cell);
+  client_relay3->write_cell(client_relay3, &cell, circ);
   tt_assert(!relay3_client->padding_enabled);
 
   /* Test case 4: Reducing padding actually reduces it */

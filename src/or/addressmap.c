@@ -17,6 +17,7 @@
 
 #include "or.h"
 #include "addressmap.h"
+#include "channeltls.h"
 #include "circuituse.h"
 #include "config.h"
 #include "connection_edge.h"

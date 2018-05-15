@@ -312,7 +312,8 @@ channelpadding_send_disable_command(channel_t *chan)
                                       &disable) < 0)
     return -1;
 
-  if (chan->write_cell(chan, &cell) == 1)
+  circuit_t* circ = circuit_get_by_circid_channel(cell.circ_id, chan);
+  if (chan->write_cell(chan, &cell, circ) == 1)
     return 0;
   else
     return -1;
@@ -346,7 +347,8 @@ channelpadding_send_enable_command(channel_t *chan, uint16_t low_timeout,
                                       &enable) < 0)
     return -1;
 
-  if (chan->write_cell(chan, &cell) == 1)
+  circuit_t* circ = circuit_get_by_circid_channel(cell.circ_id, chan);
+  if (chan->write_cell(chan, &cell, circ) == 1)
     return 0;
   else
     return -1;
@@ -407,7 +409,8 @@ channelpadding_send_padding_cell_for_callback(channel_t *chan)
    * fresh timestamp_active */
   memset(&cell, 0, sizeof(cell));
   cell.command = CELL_PADDING;
-  chan->write_cell(chan, &cell);
+  circuit_t* circ = circuit_get_by_circid_channel(cell.circ_id, chan);
+  chan->write_cell(chan, &cell, circ);
 }
 
 /**

@@ -49,6 +49,7 @@
 #define MAIN_PRIVATE
 #include "or.h"
 #include "addressmap.h"
+#include "autotune.h"
 #include "backtrace.h"
 #include "bridges.h"
 #include "buffers.h"
@@ -343,6 +344,11 @@ connection_remove(connection_t *conn)
 
   tor_assert(conn->conn_array_index >= 0);
   current_index = conn->conn_array_index;
+
+  if(get_options()->GlobalSchedulerUSec && connection_speaks_cells(conn)) {
+     global_autotune_remove_pending(TO_OR_CONN(conn));
+   }
+
   connection_unregister_events(conn); /* This is redundant, but cheap. */
   if (current_index == smartlist_len(connection_array)-1) { /* at the end */
     smartlist_del(connection_array, current_index);
@@ -921,12 +927,27 @@ conn_write_callback(evutil_socket_t fd, short events, void *_conn)
   (void)fd;
   (void)events;
 
-  LOG_FN_CONN(conn, (LOG_DEBUG, LD_NET, "socket %d wants to write.",
-                     (int)conn->s));
+  /* check if the connection is an OR connection */
+  const or_options_t* opts = get_options();
+  if((opts->GlobalSchedulerUSec || opts->AutotuneWriteUSec)
+      && connection_speaks_cells(conn)) {
+    global_autotune_conn_write_callback(TO_OR_CONN(conn));
+  } else {
+    write_to_connection(conn, 0, NULL);
+  }
+}
+
+
+size_t
+write_to_connection(connection_t *conn, size_t ceiling, int* has_error) {
+
+  LOG_FN_CONN(conn, (LOG_DEBUG, LD_NET, "socket %d wants to write. ceiling is "U64_FORMAT,
+                     (int)conn->s, ((uint64_t)ceiling)));
 
   /* assert_connection_ok(conn, time(NULL)); */
 
-  if (connection_handle_write(conn, 0) < 0) {
+  size_t n_written = 0;
+  if (connection_handle_write(conn, 0, ceiling, &n_written) < 0) {
     if (!conn->marked_for_close) {
       /* this connection is broken. remove it. */
       log_fn(LOG_WARN,LD_BUG,
@@ -943,11 +964,16 @@ conn_write_callback(evutil_socket_t fd, short events, void *_conn)
       connection_close_immediate(conn); /* So we don't try to flush. */
       connection_mark_for_close(conn);
     }
+    if(has_error) {
+      *has_error = 1;
+    }
   }
   assert_connection_ok(conn, time(NULL));
 
   if (smartlist_len(closeable_connection_lst))
     close_closeable_connections();
+    
+  return n_written;
 }
 
 /** If the connection at connection_array[i] is marked for close, then:
@@ -1764,11 +1790,13 @@ run_scheduled_events(time_t now)
   }
 
   /* 5. We do housekeeping for each connection... */
-  channel_update_bad_for_new_circs(NULL, 0);
-  int i;
-  for (i=0;i<smartlist_len(connection_array);i++) {
-    run_connection_housekeeping(i, now);
-  }
+  //IMUX
+//  channel_run_all_housekeeping(now, 1);
+
+//  int i;
+//  for (i=0;i<smartlist_len(connection_array);i++) {
+//    run_connection_housekeeping(i, now);
+//  }
 
   /* 11b. check pending unconfigured managed proxies */
   if (!net_is_disabled() && pt_proxies_configuration_pending())
@@ -3691,6 +3719,7 @@ tor_free_all(int postfork)
   smartlist_free(connection_array);
   smartlist_free(closeable_connection_lst);
   smartlist_free(active_linked_connection_lst);
+  global_autotune_free();
   periodic_timer_free(second_timer);
   teardown_periodic_events();
   tor_event_free(shutdown_did_not_work_event);

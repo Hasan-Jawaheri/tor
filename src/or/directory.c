@@ -3351,8 +3351,8 @@ connection_dir_reached_eof(dir_connection_t *conn)
 {
   int retval;
   if (conn->base_.state != DIR_CONN_STATE_CLIENT_READING) {
-    log_info(LD_HTTP,"conn reached eof, not reading. [state=%d] Closing.",
-             conn->base_.state);
+    log_info(LD_HTTP,"conn reached eof, not reading. [state=%d] Closing. connection Type = %d",
+             conn->base_.state,conn->base_.type);
     connection_close_immediate(TO_CONN(conn)); /* error: give up on flushing */
     connection_mark_for_close(TO_CONN(conn));
     return -1;
@@ -5116,6 +5116,33 @@ directory_handle_command_post,(dir_connection_t *conn, const char *headers,
  done:
   tor_free(url);
   return 0;
+}
+
+/** Decide which download schedule we want to use based on descriptor type
+ * in <b>dls</b> and whether we are acting as directory <b>server</b>, and
+ * then return a list of int pointers defining download delays in seconds.
+ * Helper function for download_status_increment_failure() and
+ * download_status_reset(). */
+static const smartlist_t *
+find_dl_schedule_and_len(download_status_t *dls, int server)
+{
+  /*switch (dls->schedule) {
+    case DL_SCHED_GENERIC:
+      if (server)
+        return get_options()->TestingServerDownloadSchedule;
+      else
+        return get_options()->TestingClientDownloadSchedule;
+    case DL_SCHED_CONSENSUS:
+      if (server)
+        return get_options()->TestingServerConsensusDownloadSchedule;
+      else
+        return get_options()->TestingClientConsensusDownloadSchedule;
+    case DL_SCHED_BRIDGE:
+      return get_options()->TestingBridgeDownloadSchedule;
+    default:
+      tor_assert(0);
+  }*/
+  return NULL;
 }
 
 /** Called when a dirserver receives data on a directory connection;

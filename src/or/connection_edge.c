@@ -661,9 +661,9 @@ connection_ap_about_to_close(entry_connection_t *entry_conn)
     dnsserv_reject_request(entry_conn);
   }
 
-  if (TO_CONN(edge_conn)->state == AP_CONN_STATE_CIRCUIT_WAIT) {
-    smartlist_remove(pending_entry_connections, entry_conn);
-  }
+  // if (TO_CONN(edge_conn)->state == AP_CONN_STATE_CIRCUIT_WAIT) {
+  //   smartlist_remove(pending_entry_connections, entry_conn);
+  // }
 
 #if 1
   /* Check to make sure that this isn't in pending_entry_connections if it
@@ -927,7 +927,7 @@ connection_ap_attach_pending(int retry)
       continue;
     }
     if (conn->state != AP_CONN_STATE_CIRCUIT_WAIT) {
-      log_warn(LD_BUG, "%p is no longer in circuit_wait. Its current state "
+      log_info(LD_BUG, "%p is no longer in circuit_wait. Its current state "
                "is %s. Why is it on pending_entry_connections?",
                entry_conn,
                conn_state_to_string(conn->type, conn->state));
@@ -2949,7 +2949,7 @@ connection_ap_make_link(connection_t *partner,
 
   /* attaching to a dirty circuit is fine */
   connection_ap_mark_as_pending_circuit(conn);
-  log_info(LD_APP,"... application connection created and linked.");
+  log_info(LD_APP,"... application connection created and linked. state : %d",base_conn->state);
   return conn;
 }
 

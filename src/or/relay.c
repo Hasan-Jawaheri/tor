@@ -51,6 +51,7 @@
 #include "backtrace.h"
 #include "buffers.h"
 #include "channel.h"
+#include "channeltls.h"
 #include "circpathbias.h"
 #include "circuitbuild.h"
 #include "circuitlist.h"
@@ -2664,7 +2665,7 @@ channel_flush_from_first_active_circuit, (channel_t *chan, int max))
       cell = destroy_cell_to_packed_cell(dcell, chan->wide_circ_ids);
       /* Send the DESTROY cell. It is very unlikely that this fails but just
        * in case, get rid of the channel. */
-      if (channel_write_packed_cell(chan, cell) < 0) {
+      if (channel_write_packed_cell(chan, NULL, circ, cell) < 0) {
         /* The cell has been freed. */
         channel_mark_for_close(chan);
         continue;
@@ -2746,7 +2747,7 @@ channel_flush_from_first_active_circuit, (channel_t *chan, int max))
 
     /* Now send the cell. It is very unlikely that this fails but just in
      * case, get rid of the channel. */
-    if (channel_write_packed_cell(chan, cell) < 0) {
+    if (channel_write_packed_cell(chan, NULL, circ, cell) < 0) {
       /* The cell has been freed at this point. */
       channel_mark_for_close(chan);
       continue;
@@ -2853,6 +2854,8 @@ append_cell_to_circuit_queue(circuit_t *circ, channel_t *chan,
   cell_queue_t *queue;
   int streams_blocked;
   int exitward;
+  int next_seq = 0;
+
   if (circ->marked_for_close)
     return;
 
@@ -2860,10 +2863,12 @@ append_cell_to_circuit_queue(circuit_t *circ, channel_t *chan,
   if (exitward) {
     queue = &circ->n_chan_cells;
     streams_blocked = circ->streams_blocked_on_n_chan;
+    next_seq = (++(circ->n_sequence));
   } else {
     orcirc = TO_OR_CIRCUIT(circ);
     queue = &orcirc->p_chan_cells;
     streams_blocked = circ->streams_blocked_on_p_chan;
+    next_seq = (++(circ->p_sequence));
   }
 
   if (PREDICT_UNLIKELY(queue->n >= max_circuit_cell_queue_size)) {
@@ -2876,6 +2881,8 @@ append_cell_to_circuit_queue(circuit_t *circ, channel_t *chan,
     stats_n_circ_max_cell_reached++;
     return;
   }
+  
+  cell->sequence = next_seq;
 
   /* Very important that we copy to the circuit queue because all calls to
    * this function use the stack for the cell memory. */
@@ -2904,6 +2911,17 @@ append_cell_to_circuit_queue(circuit_t *circ, channel_t *chan,
     /* This was the first cell added to the queue.  We just made this
      * circuit active. */
     log_debug(LD_GENERAL, "Made a circuit active.");
+  }
+  
+  if(get_options()->GlobalSchedulerUSec) {
+    channel_start_writing(chan);
+  } else if (!channel_has_queued_writes(chan)) {
+    /* There is no data at all waiting to be sent on the outbuf.  Add a
+     * cell, so that we can notice when it gets flushed, flushed_some can
+     * get called, and we can start putting more data onto the buffer then.
+     */
+    log_debug(LD_GENERAL, "Primed a buffer.");
+    channel_flush_from_first_active_circuit(chan, 1);
   }
 
   /* New way: mark this as having waiting cells for the scheduler */

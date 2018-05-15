@@ -232,7 +232,7 @@ test_link_handshake_certs_ok(void *arg)
     mock_peer_cert = tor_x509_cert_dup(linkc); /* and when we do, the peer's
                                                 *  cert is this... */
   }
-  channel_tls_process_certs_cell(cell2, chan1);
+  channel_tls_process_certs_cell(cell2, chan1, NULL);
   mock_peer_cert_expect_tortls = NULL;
   tor_x509_cert_free(mock_peer_cert);
   mock_peer_cert = NULL;
@@ -269,7 +269,7 @@ test_link_handshake_certs_ok(void *arg)
   c2->base_.conn_array_index = -1;
   crypto_pk_get_digest(key1, c2->identity_digest);
 
-  channel_tls_process_certs_cell(cell1, chan2);
+  channel_tls_process_certs_cell(cell1, chan2, NULL);
 
   tt_assert(c2->handshake_state->received_certs_cell);
   if (with_ed) {
@@ -484,7 +484,7 @@ static void
 test_link_handshake_recv_certs_ok(void *arg)
 {
   certs_data_t *d = arg;
-  channel_tls_process_certs_cell(d->cell, d->chan);
+  channel_tls_process_certs_cell(d->cell, d->chan, NULL);
   tt_int_op(0, OP_EQ, mock_close_called);
   tt_int_op(d->c->handshake_state->authenticated, OP_EQ, 1);
   tt_int_op(d->c->handshake_state->authenticated_rsa, OP_EQ, 1);
@@ -516,7 +516,7 @@ test_link_handshake_recv_certs_ok_server(void *arg)
   certs_data_t *d = arg;
   d->c->handshake_state->started_here = 0;
   d->c->handshake_state->certs->started_here = 0;
-  channel_tls_process_certs_cell(d->cell, d->chan);
+  channel_tls_process_certs_cell(d->cell, d->chan, NULL);
   tt_int_op(0, OP_EQ, mock_close_called);
   tt_int_op(d->c->handshake_state->authenticated, OP_EQ, 0);
   tt_int_op(d->c->handshake_state->received_certs_cell, OP_EQ, 1);
@@ -542,7 +542,7 @@ test_link_handshake_recv_certs_ok_server(void *arg)
     const char *require_failure_message = NULL;                         \
     setup_capture_of_logs(LOG_INFO);                                    \
     { code ; }                                                          \
-    channel_tls_process_certs_cell(d->cell, d->chan);                   \
+    channel_tls_process_certs_cell(d->cell, d->chan, NULL);                   \
     tt_int_op(1, OP_EQ, mock_close_called);                                \
     tt_int_op(0, OP_EQ, mock_send_authenticate_called);                    \
     tt_int_op(0, OP_EQ, mock_send_netinfo_called);                         \
@@ -685,7 +685,7 @@ test_link_handshake_recv_certs_missing_id(void *arg) /* ed25519 */
 
   /* This handshake succeeds, but since we have no ID cert, we will
    * just do the RSA handshake. */
-  channel_tls_process_certs_cell(d->cell, d->chan);
+  channel_tls_process_certs_cell(d->cell, d->chan, NULL);
   tt_int_op(0, OP_EQ, mock_close_called);
   tt_int_op(0, OP_EQ, d->c->handshake_state->authenticated_ed25519);
   tt_int_op(1, OP_EQ, d->c->handshake_state->authenticated_rsa);
@@ -1009,7 +1009,7 @@ test_link_handshake_recv_authchallenge_ok(void *arg)
 {
   authchallenge_data_t *d = arg;
 
-  channel_tls_process_auth_challenge_cell(d->cell, d->chan);
+  channel_tls_process_auth_challenge_cell(d->cell, d->chan, NULL);
   tt_int_op(0, OP_EQ, mock_close_called);
   tt_int_op(1, OP_EQ, d->c->handshake_state->received_auth_challenge);
   tt_int_op(1, OP_EQ, mock_send_authenticate_called);
@@ -1028,7 +1028,7 @@ test_link_handshake_recv_authchallenge_ok_ed25519(void *arg)
   d->cell->payload[33] = 3; /* 3 types are supported now. */
   d->cell->payload[39] = 3;
   d->cell->payload_len += 2;
-  channel_tls_process_auth_challenge_cell(d->cell, d->chan);
+  channel_tls_process_auth_challenge_cell(d->cell, d->chan, NULL);
   tt_int_op(0, OP_EQ, mock_close_called);
   tt_int_op(1, OP_EQ, d->c->handshake_state->received_auth_challenge);
   tt_int_op(1, OP_EQ, mock_send_authenticate_called);
@@ -1044,7 +1044,7 @@ test_link_handshake_recv_authchallenge_ok_noserver(void *arg)
   authchallenge_data_t *d = arg;
   get_options_mutable()->ORPort_set = 0;
 
-  channel_tls_process_auth_challenge_cell(d->cell, d->chan);
+  channel_tls_process_auth_challenge_cell(d->cell, d->chan, NULL);
   tt_int_op(0, OP_EQ, mock_close_called);
   tt_int_op(1, OP_EQ, d->c->handshake_state->received_auth_challenge);
   tt_int_op(0, OP_EQ, mock_send_authenticate_called);
@@ -1059,7 +1059,7 @@ test_link_handshake_recv_authchallenge_ok_unrecognized(void *arg)
   authchallenge_data_t *d = arg;
   d->cell->payload[37] = 99;
 
-  channel_tls_process_auth_challenge_cell(d->cell, d->chan);
+  channel_tls_process_auth_challenge_cell(d->cell, d->chan, NULL);
   tt_int_op(0, OP_EQ, mock_close_called);
   tt_int_op(1, OP_EQ, d->c->handshake_state->received_auth_challenge);
   tt_int_op(0, OP_EQ, mock_send_authenticate_called);
@@ -1076,7 +1076,7 @@ test_link_handshake_recv_authchallenge_ok_unrecognized(void *arg)
     const char *require_failure_message = NULL;                         \
     setup_capture_of_logs(LOG_INFO);                                    \
     { code ; }                                                          \
-    channel_tls_process_auth_challenge_cell(d->cell, d->chan);          \
+    channel_tls_process_auth_challenge_cell(d->cell, d->chan, NULL);          \
     tt_int_op(1, OP_EQ, mock_close_called);                                \
     tt_int_op(0, OP_EQ, mock_send_authenticate_called);                    \
     tt_int_op(0, OP_EQ, mock_send_netinfo_called);                         \
@@ -1335,7 +1335,7 @@ test_link_handshake_auth_cell(void *arg)
 
   /* Then feed it to c2. */
   tt_int_op(d->c2->handshake_state->authenticated, OP_EQ, 0);
-  channel_tls_process_authenticate_cell(d->cell, d->chan2);
+  channel_tls_process_authenticate_cell(d->cell, d->chan2, NULL);
   tt_int_op(mock_close_called, OP_EQ, 0);
   tt_int_op(d->c2->handshake_state->authenticated, OP_EQ, 1);
   if (d->is_ed) {
@@ -1360,7 +1360,7 @@ test_link_handshake_auth_cell(void *arg)
     setup_capture_of_logs(LOG_INFO);                            \
     { code ; }                                                  \
     tt_int_op(d->c2->handshake_state->authenticated, OP_EQ, 0);    \
-    channel_tls_process_authenticate_cell(d->cell, d->chan2);   \
+    channel_tls_process_authenticate_cell(d->cell, d->chan2, NULL);   \
     tt_int_op(mock_close_called, OP_EQ, 1);                        \
     tt_int_op(d->c2->handshake_state->authenticated, OP_EQ, 0);    \
     if (require_failure_message) {                              \
@@ -1389,7 +1389,7 @@ test_link_handshake_auth_already_authenticated(void *arg)
   authenticate_data_t *d = arg;
   setup_capture_of_logs(LOG_INFO);
   d->c2->handshake_state->authenticated = 1;
-  channel_tls_process_authenticate_cell(d->cell, d->chan2);
+  channel_tls_process_authenticate_cell(d->cell, d->chan2, NULL);
   tt_int_op(mock_close_called, OP_EQ, 1);
   tt_int_op(d->c2->handshake_state->authenticated, OP_EQ, 1);
   expect_log_msg_containing("The peer is already authenticated");

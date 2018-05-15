@@ -449,7 +449,7 @@ MOCK_IMPL(void, channel_write_to_kernel, (channel_t *chan))
   log_debug(LD_SCHED, "Writing %lu bytes to kernel for chan %" PRIu64,
             (unsigned long)channel_outbuf_length(chan),
             chan->global_identifier);
-  connection_handle_write(TO_CONN(BASE_CHAN_TO_TLS(chan)->conn), 0);
+  connection_handle_write(TO_CONN(BASE_CHAN_TO_TLS(chan)->conn), 0, 0, 0);
 }
 
 /* Return true iff the scheduler has work to perform. */

@@ -19,8 +19,11 @@ EXTRA_DIST+= src/or/ntmain.c src/or/Makefile.nmake
 
 LIBTOR_A_SOURCES = \
 	src/or/addressmap.c				\
+	src/or/autotune.c				\
 	src/or/bridges.c				\
 	src/or/channel.c				\
+	src/or/channeldual.c				\
+	src/or/channelimux.c				\
 	src/or/channelpadding.c				\
 	src/or/channeltls.c				\
 	src/or/circpathbias.c				\
@@ -177,9 +180,12 @@ endif
 
 ORHEADERS = \
 	src/or/addressmap.h				\
+	src/or/autotune.h				\
 	src/or/auth_dirs.inc				\
 	src/or/bridges.h				\
 	src/or/channel.h				\
+	src/or/channeldual.h				\
+	src/or/channelimux.h				\
 	src/or/channelpadding.h				\
 	src/or/channeltls.h				\
 	src/or/circpathbias.h				\

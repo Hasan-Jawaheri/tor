@@ -2913,9 +2913,12 @@ dirserv_single_reachability_test(time_t now, routerinfo_t *router)
   log_debug(LD_OR,"Testing reachability of %s at %s:%u.",
             router->nickname, fmt_addr32(router->addr), router->or_port);
   tor_addr_from_ipv4h(&router_addr, router->addr);
-  chan = channel_tls_connect(&router_addr, router->or_port,
-                             router->cache_info.identity_digest,
-                             ed_id_key);
+  //IMUX
+  channel_type_t type = get_options()->ChannelType;
+    chan = channel_connect(&router_addr, router->or_port,
+                               router->cache_info.identity_digest, ed_id_key, type);
+//  chan = channel_tls_connect(&router_addr, router->or_port,
+//                             router->cache_info.identity_digest);
   if (chan) command_setup_channel(chan);
 
   /* Possible IPv6. */
