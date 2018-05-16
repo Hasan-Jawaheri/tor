@@ -1514,7 +1514,7 @@ channel_imux_handle_state_change_on_orconn(channel_t *chan, or_connection_t *con
     /* if this is the first conneciton to open, mark channel open as well */
     if(chan->state != CHANNEL_STATE_OPEN) {
           imuxchan->controlconn = conn;
-          channel_change_state(chan, CHANNEL_STATE_OPEN);
+          channel_change_state_(chan, CHANNEL_STATE_OPEN);
 
           imuxchan->is_canonical = conn->is_canonical;
           imuxchan->link_proto = conn->link_proto;
