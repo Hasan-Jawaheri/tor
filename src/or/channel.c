@@ -1661,7 +1661,7 @@ channel_change_state_(channel_t *chan, channel_state_t to_state)
 void
 channel_change_state(channel_t *chan, channel_state_t to_state)
 {
-  tor_assert(to_state != CHANNEL_STATE_OPEN);
+  // tor_assert(to_state != CHANNEL_STATE_OPEN); IDK!
   channel_change_state_(chan, to_state);
 }
 
