@@ -133,9 +133,7 @@ channel_dual_common_init(channel_dual_t *dualchan)
   chan->write_var_cell = channel_dual_write_var_cell_method;
 
   chan->cmux = circuitmux_alloc();
-  if (/*cell_ewma_enabled() WHERE IS THIS? **/ 0) {
-    circuitmux_set_policy(chan->cmux, &ewma_policy);
-  }
+  circuitmux_set_policy(chan->cmux, &ewma_policy);
 }
 
 
