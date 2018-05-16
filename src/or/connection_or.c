@@ -432,7 +432,7 @@ cell_pack(packed_cell_t *dst, const cell_t *src, int wide_circ_ids)
   }
   
   set_uint32(dest, htonl(src->sequence));
-    dest += 4;
+  dest += 4;
 
   set_uint8(dest, src->command);
   memcpy(dest+1, src->payload, CELL_PAYLOAD_SIZE);
@@ -451,6 +451,10 @@ cell_unpack(cell_t *dest, const char *src, int wide_circ_ids)
     dest->circ_id = ntohs(get_uint16(src));
     src += 2;
   }
+  
+	dest->sequence = ntohl(get_uint32(src));
+  src += 4;
+
   dest->command = get_uint8(src);
   memcpy(dest->payload, src+1, CELL_PAYLOAD_SIZE);
 }

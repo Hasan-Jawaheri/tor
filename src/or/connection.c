@@ -4080,13 +4080,6 @@ connection_write_to_buf_failed(connection_t *conn)
 static void
 connection_write_to_buf_commit(connection_t *conn, size_t len)
 {
-  /* Should we try flushing the outbuf now? */
-  if (conn->in_flushed_some || get_options()->AutotuneWriteUSec) {
-    /* Don't flush the outbuf when the reason we're writing more stuff is
-    * _because_ we flushed the outbuf.  That's unfair. */
-    return;
-  }
-  
   /* If we receive optimistic data in the EXIT_CONN_STATE_RESOLVING
    * state, we don't want to try to write it right away, since
    * conn->write_event won't be set yet.  Otherwise, write data from
@@ -4095,14 +4088,6 @@ connection_write_to_buf_commit(connection_t *conn, size_t len)
     connection_start_writing(conn);
   }
   conn->outbuf_flushlen += len;
-
-  //IMUX
-  /* Should we try flushing the outbuf now? */
-  if (conn->in_flushed_some || get_options()->AutotuneWriteUSec) {
-    /* Don't flush the outbuf when the reason we're writing more stuff is
-      * _because_ we flushed the outbuf.  That's unfair. */
-    return;
-  }
 
   if (conn->type == CONN_TYPE_CONTROL &&
               !connection_is_rate_limited(conn) &&
@@ -4162,6 +4147,13 @@ connection_write_to_buf_impl_,(const char *string, size_t len,
   }
   if (r < 0) {
     connection_write_to_buf_failed(conn);
+    return;
+  }
+  
+  /* Should we try flushing the outbuf now? */
+  if (conn->in_flushed_some || get_options()->AutotuneWriteUSec) {
+    /* Don't flush the outbuf when the reason we're writing more stuff is
+    * _because_ we flushed the outbuf.  That's unfair. */
     return;
   }
   connection_write_to_buf_commit(conn, written);
