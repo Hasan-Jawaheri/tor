@@ -299,7 +299,7 @@ channelpadding_send_disable_command(channel_t *chan)
   channelpadding_negotiate_t disable;
   cell_t cell;
 
-  tor_assert(BASE_CHAN_TO_TLS(chan)->conn->link_proto >=
+  tor_assert(get_or_conn_from_chan(chan)->link_proto >=
              MIN_LINK_PROTO_FOR_CHANNEL_PADDING);
 
   memset(&cell, 0, sizeof(cell_t));
@@ -332,7 +332,7 @@ channelpadding_send_enable_command(channel_t *chan, uint16_t low_timeout,
   channelpadding_negotiate_t enable;
   cell_t cell;
 
-  tor_assert(BASE_CHAN_TO_TLS(chan)->conn->link_proto >=
+  tor_assert(get_or_conn_from_chan(chan)->link_proto >=
              MIN_LINK_PROTO_FOR_CHANNEL_PADDING);
 
   memset(&cell, 0, sizeof(cell_t));
@@ -431,9 +431,9 @@ channelpadding_send_padding_callback(tor_timer_t *timer, void *args,
   if (chan && CHANNEL_CAN_HANDLE_CELLS(chan)) {
     /* Hrmm.. It might be nice to have an equivalent to assert_connection_ok
      * for channels. Then we could get rid of the channeltls dependency */
-    tor_assert(TO_CONN(BASE_CHAN_TO_TLS(chan)->conn)->magic ==
+    tor_assert(TO_CONN(get_or_conn_from_chan(chan))->magic ==
                OR_CONNECTION_MAGIC);
-    assert_connection_ok(TO_CONN(BASE_CHAN_TO_TLS(chan)->conn), approx_time());
+    assert_connection_ok(TO_CONN(get_or_conn_from_chan(chan)), approx_time());
 
     channelpadding_send_padding_cell_for_callback(chan);
   } else {

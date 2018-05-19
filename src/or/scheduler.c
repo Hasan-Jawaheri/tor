@@ -707,8 +707,9 @@ scheduler_bug_occurred(const channel_t *chan)
   char buf[128];
 
   if (chan != NULL) {
+    or_connection_t* orconn = get_or_conn_from_chan(chan);
     const size_t outbuf_len =
-      buf_datalen(TO_CONN(BASE_CHAN_TO_TLS((channel_t *) chan)->conn)->outbuf);
+      buf_datalen(TO_CONN(orconn)->outbuf);
     tor_snprintf(buf, sizeof(buf),
                  "Channel %" PRIu64 " in state %s and scheduler state %s."
                  " Num cells on cmux: %d. Connection outbuf len: %lu.",

@@ -377,8 +377,8 @@ channel_tls_from_base(channel_t *chan)
 {
   if (!chan) return NULL;
 
-  if(chan->type != CHANNEL_TYPE_IMUX)
-    tor_assert(chan->magic == TLS_CHAN_MAGIC);
+  //if(chan->type != CHANNEL_TYPE_IMUX)
+  tor_assert(chan->magic == TLS_CHAN_MAGIC);
 
   return (channel_tls_t *)(chan);
 }

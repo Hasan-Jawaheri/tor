@@ -68,6 +68,8 @@
 #include "backtrace.h"
 #include "channel.h"
 #include "channeltls.h"
+#include "channelimux.h"
+#include "channeldual.h"
 #include "circuitbuild.h"
 #include "circuitlist.h"
 #include "circuituse.h"
@@ -5324,3 +5326,24 @@ clock_skew_warning, (const connection_t *conn, long apparent_skew, int trusted,
   tor_free(ext_source);
 }
 
+
+or_connection_t* get_or_conn_from_chan(channel_t* chan) {
+  if (!chan)
+    return NULL;
+
+  switch (get_options()->ChannelType) {
+    case CHANNEL_TYPE_UNKNOWN:
+      break;
+    case CHANNEL_TYPE_TLS:
+      return BASE_CHAN_TO_TLS(chan)->conn;
+    case CHANNEL_TYPE_PCTCP:
+      /* IMPLEMENT? */
+      break;
+    case CHANNEL_TYPE_DUAL:
+      return TO_CONN(((channel_dual_t*)chan));
+    case CHANNEL_TYPE_IMUX:
+      return TO_CONN(((channel_imux_t*)chan));
+  }
+  log_err(LD_GENERAL, "Unknown ChannelType used");
+  return NULL;
+}

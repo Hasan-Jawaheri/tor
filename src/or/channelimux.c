@@ -1386,7 +1386,7 @@ channel_imux_write_packed_cell_method(channel_t *chan, or_connection_t *conn,
   if(imuxconn)
      channel_imux_update_connection_ewma(imuxchan, imuxconn);
 
-  packed_cell_free(packed_cell);
+  //packed_cell_free(packed_cell);
 
   return 1;
 }

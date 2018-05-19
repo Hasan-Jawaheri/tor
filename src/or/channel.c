@@ -2099,7 +2099,7 @@ channel_do_open_actions(channel_t *chan)
     if (channel_is_client(chan)) {
       if (channel_get_addr_if_possible(chan, &remote_addr)) {
         char *transport_name = NULL;
-        channel_tls_t *tlschan = BASE_CHAN_TO_TLS(chan);
+        or_connection_t* chan_conn = get_or_conn_from_chan(chan);
         if (chan->get_transport_name(chan, &transport_name) < 0)
           transport_name = NULL;
 
@@ -2108,8 +2108,8 @@ channel_do_open_actions(channel_t *chan)
                                now);
         tor_free(transport_name);
         /* Notify the DoS subsystem of a new client. */
-        if (tlschan && tlschan->conn) {
-          dos_new_client_conn(tlschan->conn);
+        if (chan_conn) {
+            dos_new_client_conn(chan_conn);
         }
       }
       /* Otherwise the underlying transport can't tell us this, so skip it */
@@ -3759,14 +3759,14 @@ channel_rsa_id_group_set_badness(struct channel_list_s *lst, int force)
   /* if there is only one channel, don't bother looping */
   if (PREDICT_LIKELY(!TOR_LIST_NEXT(chan, next_with_same_id))) {
     connection_or_single_set_badness_(
-            time(NULL), BASE_CHAN_TO_TLS(chan)->conn, force);
+            time(NULL), get_or_conn_from_chan(chan), force);
     return;
   }
 
   smartlist_t *channels = smartlist_new();
 
   TOR_LIST_FOREACH(chan, lst, next_with_same_id) {
-    if (BASE_CHAN_TO_TLS(chan)->conn) {
+    if (get_or_conn_from_chan(chan)) {
       smartlist_add(channels, chan);
     }
   }
@@ -3787,7 +3787,7 @@ channel_rsa_id_group_set_badness(struct channel_list_s *lst, int force)
         common_ed25519_identity = &channel->ed25519_identity;
     }
 
-    smartlist_add(or_conns, BASE_CHAN_TO_TLS(channel)->conn);
+    smartlist_add(or_conns, get_or_conn_from_chan(channel));
   } SMARTLIST_FOREACH_END(channel);
 
   connection_or_group_set_badness_(or_conns, force);

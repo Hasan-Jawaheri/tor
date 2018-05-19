@@ -15,6 +15,8 @@
 /* XXXX For buf_datalen in inline function */
 #include "buffers.h"
 
+or_connection_t* get_or_conn_from_chan(channel_t* chan);
+
 const char *conn_type_to_string(int type);
 const char *conn_state_to_string(int type, int state);
 int conn_listener_type_supports_af_unix(int type);

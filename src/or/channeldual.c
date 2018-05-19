@@ -863,7 +863,7 @@ channel_dual_write_packed_cell_method(channel_t *chan, or_connection_t *conn,
 
   connection_buf_add(packed_cell->body, cell_network_size, TO_CONN(dualcirc->writeconn));
 
-  packed_cell_free(packed_cell);
+  //packed_cell_free(packed_cell);
 
   return 1;
 }
