@@ -46,6 +46,7 @@
 #include "hs_circuit.h"
 #include "hs_ident.h"
 #include "hs_stats.h"
+#include "relay.h"
 #include "nodelist.h"
 #include "networkstatus.h"
 #include "policies.h"
@@ -326,8 +327,7 @@ circuit_get_best(const entry_connection_t *conn,
 {
   origin_circuit_t *best=NULL;
   struct timeval now;
-  int intro_going_on_but_too_old = 0;
-
+  
   tor_assert(conn);
 
   tor_assert(purpose == CIRCUIT_PURPOSE_C_GENERAL ||
@@ -350,7 +350,6 @@ circuit_get_best(const entry_connection_t *conn,
     if (purpose == CIRCUIT_PURPOSE_C_INTRODUCE_ACK_WAIT &&
         !must_be_open && origin_circ->hs_circ_has_timed_out &&
         !circ->marked_for_close) {
-        intro_going_on_but_too_old = 1;
         continue;
     }
 
@@ -366,7 +365,6 @@ circuit_get_best(const entry_connection_t *conn,
   }
   SMARTLIST_FOREACH_END(circ);
 
-  //if (!best && intro_going_on_but_too_old)
   log_info(LD_REND|LD_CIRC, "There is an intro circuit being created "
             "right now, but it has already taken quite a while. Starting "
             "one in parallel. %p",best);

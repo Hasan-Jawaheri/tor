@@ -53,7 +53,7 @@ typedef struct channel_imux_connection_t {
 typedef struct channel_imux_circuit_t {
     circuit_t *circ;
     circid_t circ_id;
-    int next_sequence;
+    uint32_t next_sequence;
     smartlist_t *cell_queue;
     int active;
 

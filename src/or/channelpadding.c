@@ -14,6 +14,7 @@
 #include "channeltls.h"
 #include "config.h"
 #include "networkstatus.h"
+#include "circuitlist.h"
 #include "connection.h"
 #include "connection_or.h"
 #include "crypto_rand.h"

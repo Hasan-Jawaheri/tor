@@ -1,0 +1,7 @@
+{
+    "files.associations": {
+        "circuitmux.h": "c",
+        "networkstatus.h": "c",
+        "connection.h": "c"
+    }
+}

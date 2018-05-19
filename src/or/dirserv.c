@@ -2917,8 +2917,6 @@ dirserv_single_reachability_test(time_t now, routerinfo_t *router)
   channel_type_t type = get_options()->ChannelType;
     chan = channel_connect(&router_addr, router->or_port,
                                router->cache_info.identity_digest, ed_id_key, type);
-//  chan = channel_tls_connect(&router_addr, router->or_port,
-//                             router->cache_info.identity_digest);
   if (chan) command_setup_channel(chan);
 
   /* Possible IPv6. */
@@ -2929,9 +2927,9 @@ dirserv_single_reachability_test(time_t now, routerinfo_t *router)
               router->nickname,
               tor_addr_to_str(addrstr, &router->ipv6_addr, sizeof(addrstr), 1),
               router->ipv6_orport);
-    chan = channel_tls_connect(&router->ipv6_addr, router->ipv6_orport,
+    chan = channel_connect(&router->ipv6_addr, router->ipv6_orport,
                                router->cache_info.identity_digest,
-                               ed_id_key);
+                               ed_id_key, type);
     if (chan) command_setup_channel(chan);
   }
 }

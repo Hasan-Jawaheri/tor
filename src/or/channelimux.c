@@ -83,6 +83,7 @@ HT_GENERATE(channel_imux_map, channel_imux_conn_entry_t, node, channel_imux_map_
 
 /* Utility function declarations */
 static void channel_imux_common_init(channel_imux_t *imuxchan);
+static int channel_imux_get_chan_max_connections(channel_imux_t *imuxchan);
 
 /**
  * Do parts of channel_imux_t initialization common to channel_imux_connect()
@@ -99,6 +100,7 @@ channel_imux_common_init(channel_imux_t *imuxchan)
   chan = &(imuxchan->base_);
   channel_init(chan);
   chan->magic = IMUX_CHAN_MAGIC;
+  chan->type = CHANNEL_TYPE_IMUX;
   chan->state = CHANNEL_STATE_OPENING;
   chan->close = channel_imux_close_method;
   chan->free_fn = channel_imux_free_method;
@@ -128,7 +130,7 @@ channel_imux_common_init(channel_imux_t *imuxchan)
 static size_t
 channel_imux_num_bytes_queued_method(channel_t *chan)
 {
-	size_t* total_queued_size = 0;
+	size_t total_queued_size = 0;
   channel_imux_t *imuxchan = BASE_CHAN_TO_IMUX(chan);
 
   tor_assert(imuxchan);
@@ -146,7 +148,7 @@ channel_imux_num_bytes_queued_method(channel_t *chan)
 static int
 channel_imux_num_cells_writeable_method(channel_t *chan)
 {
-  size_t outbuf_len;
+  size_t outbuf_len = 0;
   ssize_t n = 0;
   channel_imux_t *imuxchan = BASE_CHAN_TO_IMUX(chan);
   size_t cell_network_size = 0;
@@ -172,7 +174,7 @@ channel_imux_num_cells_writeable_method(channel_t *chan)
 }
 
 // end Lamiaa
-channel_imux_connection_t *
+static channel_imux_connection_t *
 channel_imux_create_connection(channel_imux_t *imuxchan)
 {
     channel_t *chan = IMUX_CHAN_TO_BASE(imuxchan);
@@ -206,12 +208,13 @@ channel_t *
 channel_imux_connect(const tor_addr_t *addr, uint16_t port,
                     const char *id_digest, const ed25519_public_key_t *ed_id)
 {
+  (void)ed_id;
 
   channel_imux_t *imuxchan = tor_malloc_zero(sizeof(*imuxchan));
   channel_t *chan = &(imuxchan->base_);
   int i;
   log_debug(LD_CHANNEL,
-              "In channel_imux_connect() for channel %p ");
+              "In channel_imux_connect() for channel %p ", (void*)chan);
 
   channel_imux_common_init(imuxchan);
 
@@ -291,7 +294,7 @@ channel_imux_connect(const tor_addr_t *addr, uint16_t port,
   return chan;
 }
 
-channel_imux_connection_t *
+static channel_imux_connection_t *
 channel_imux_get_connection_to_close(channel_imux_t *imuxchan, int consider_open)
 {
   tor_assert(imuxchan);
@@ -317,7 +320,7 @@ channel_imux_get_connection_to_close(channel_imux_t *imuxchan, int consider_open
 }
 
 
-void
+static void
 channel_imux_send_command_cell(or_connection_t *conn, int command)
 {
   cell_t cell;
@@ -330,7 +333,7 @@ channel_imux_send_command_cell(or_connection_t *conn, int command)
 //}
 }
 
-void
+static void
 channel_imux_mark_conn_for_close(channel_imux_t *imuxchan, channel_imux_connection_t *imuxconn)
 {
   tor_assert(imuxchan);
@@ -347,7 +350,7 @@ channel_imux_mark_conn_for_close(channel_imux_t *imuxchan, channel_imux_connecti
   imuxconn->marked_for_close = 1;
 }
 
-void
+static void
 channel_imux_close_connection(channel_imux_t *imuxchan, channel_imux_connection_t *imuxconn)
 {
   tor_assert(imuxchan);
@@ -369,7 +372,7 @@ channel_imux_close_connection(channel_imux_t *imuxchan, channel_imux_connection_
  * Create a new channel around an incoming or_connection_t
  */
 
-channel_t *
+static channel_t *
 channel_imux_create_incoming(tor_addr_t addr, uint16_t port, char *id_digest)
 {
   channel_imux_t *imuxchan = tor_malloc_zero(sizeof(*imuxchan));
@@ -805,7 +808,7 @@ channel_imux_matches_target_method(channel_t *chan,
   return tor_addr_eq(&(imuxchan->addr), target);
 }
 
-channel_imux_circuit_t *
+static channel_imux_circuit_t *
 channel_imux_find_circuit(channel_imux_t *imuxchan, circid_t circ_id)
 {
   tor_assert(imuxchan);
@@ -820,7 +823,7 @@ channel_imux_find_circuit(channel_imux_t *imuxchan, circid_t circ_id)
   return NULL;
 }
 
-channel_imux_connection_t *
+static channel_imux_connection_t *
 channel_imux_find_connection_by_orconn(channel_imux_t *imuxchan, or_connection_t *orconn)
 {
   tor_assert(imuxchan);
@@ -835,7 +838,7 @@ channel_imux_find_connection_by_orconn(channel_imux_t *imuxchan, or_connection_t
   return NULL;
 }
 
-channel_imux_connection_t *
+/*static channel_imux_connection_t *
 channel_imux_get_most_idle_connection(channel_imux_t *imuxchan)
 {
   tor_assert(imuxchan);
@@ -854,9 +857,9 @@ channel_imux_get_most_idle_connection(channel_imux_t *imuxchan)
   SMARTLIST_FOREACH_END(c);
 
   return conn;
-}
+}*/
 
-channel_imux_connection_t *
+static channel_imux_connection_t *
 channel_imux_get_next_open_connection(channel_imux_t *imuxchan)
 {
   tor_assert(imuxchan);
@@ -877,9 +880,11 @@ channel_imux_get_next_open_connection(channel_imux_t *imuxchan)
   return imuxconn;
 }
 
-channel_imux_connection_t *
+static channel_imux_connection_t *
 channel_imux_get_best_connection(channel_imux_t *imuxchan, channel_imux_circuit_t *imuxcirc)
 {
+  (void)imuxcirc;
+
   tor_assert(imuxchan);
 
   channel_imux_connection_t *bestconn = NULL;
@@ -926,7 +931,7 @@ channel_imux_compare_connection_by_ewma(const void **a, const void **b)
 }
 
 
-channel_imux_connection_t *
+static channel_imux_connection_t *
 channel_imux_get_ewma_connection(channel_imux_t *imuxchan, channel_imux_circuit_t *imuxcirc)
 {
   tor_assert(imuxchan);
@@ -982,7 +987,7 @@ channel_imux_get_ewma_connection(channel_imux_t *imuxchan, channel_imux_circuit_
   return imuxconn;
 }
 
-channel_imux_connection_t *
+static channel_imux_connection_t *
 channel_imux_get_pctcp_connection(channel_imux_t *imuxchan, channel_imux_circuit_t *imuxcirc)
 {
   tor_assert(imuxchan);
@@ -1023,7 +1028,7 @@ channel_imux_get_pctcp_connection(channel_imux_t *imuxchan, channel_imux_circuit
   return channel_imux_get_best_connection(imuxchan, imuxcirc);
 }
 
-channel_imux_connection_t *
+static channel_imux_connection_t *
 channel_imux_get_single_web_connection(channel_imux_t *imuxchan, channel_imux_circuit_t *imuxcirc)
 {
   tor_assert(imuxchan);
@@ -1083,11 +1088,11 @@ channel_imux_get_single_web_connection(channel_imux_t *imuxchan, channel_imux_ci
   return channel_imux_get_best_connection(imuxchan, imuxcirc);
 }
 
-
-
-channel_imux_connection_t *
+static channel_imux_connection_t *
 channel_imux_get_write_connection(channel_imux_t *imuxchan, channel_imux_circuit_t *imuxcirc, uint8_t command)
 {
+  (void)command;
+
   tor_assert(imuxchan);
 
   channel_imux_connection_t *conn = NULL;
@@ -1145,7 +1150,7 @@ channel_imux_get_write_connection(channel_imux_t *imuxchan, channel_imux_circuit
   return conn;
 }
 
-unsigned int
+static unsigned int
 channel_imux_get_tick(struct timeval *now, double *fractional_tick)
 {
   unsigned int tick = now->tv_sec / EWMA_TICK;
@@ -1153,7 +1158,7 @@ channel_imux_get_tick(struct timeval *now, double *fractional_tick)
   return tick;
 }
 
-double
+static double
 channel_imux_get_scale_factor(unsigned int last_tick, unsigned int curr_tick, double base_scale_factor)
 {
   int delta = (int)(curr_tick - last_tick);
@@ -1161,7 +1166,7 @@ channel_imux_get_scale_factor(unsigned int last_tick, unsigned int curr_tick, do
   return factor;
 }
 
-void
+static void
 channel_imux_circuit_active_check(channel_imux_t *imuxchan, channel_imux_circuit_t *circ)
 {
   tor_assert(imuxchan);
@@ -1186,7 +1191,7 @@ channel_imux_circuit_active_check(channel_imux_t *imuxchan, channel_imux_circuit
   }
 }
 
-void
+static void
 channel_imux_update_circuit_ewma(channel_imux_t *imuxchan, channel_imux_circuit_t *circ)
 {
   tor_assert(imuxchan);
@@ -1220,7 +1225,7 @@ channel_imux_update_circuit_ewma(channel_imux_t *imuxchan, channel_imux_circuit_
   channel_imux_circuit_active_check(imuxchan, circ);
 }
 
-void
+static void
 channel_imux_update_connection_ewma(channel_imux_t *imuxchan, channel_imux_connection_t *imuxconn)
 {
   tor_assert(imuxchan);
@@ -1263,6 +1268,8 @@ channel_imux_update_connection_ewma(channel_imux_t *imuxchan, channel_imux_conne
 int
 channel_imux_write_cell_method(channel_t *chan, cell_t *cell, circuit_t *circ)
 {
+  (void)circ;
+
   tor_assert(chan);
   tor_assert(cell);
 
@@ -1401,6 +1408,8 @@ channel_imux_write_packed_cell_method(channel_t *chan, or_connection_t *conn,
 int
 channel_imux_write_var_cell_method(channel_t *chan, var_cell_t *var_cell, circuit_t *circ)
 {
+  (void)circ;
+
   channel_imux_t *imuxchan = BASE_CHAN_TO_IMUX(chan);
 
   tor_assert(imuxchan);
@@ -1436,7 +1445,7 @@ channel_imux_write_var_cell_method(channel_t *chan, var_cell_t *var_cell, circui
  * Functions for handling events on an or_connection_t *
  ******************************************************/
 
-channel_imux_connection_t *
+static channel_imux_connection_t *
 channel_imux_find_imux_connection(channel_t *chan, or_connection_t *conn)
 {
   tor_assert(chan);
@@ -1519,12 +1528,9 @@ channel_imux_handle_state_change_on_orconn(channel_t *chan, or_connection_t *con
         }
   }
 
-
-
-
   /* if we're transitioning from open state, remove from open connection list */
   if(old_state == OR_CONN_STATE_OPEN) {
-    channel_imux_connection_t *imuxconn = channel_imux_find_imux_connection(chan, conn);
+    imuxconn = channel_imux_find_imux_connection(chan, conn);
     if(imuxconn)
       smartlist_remove(imuxchan->open_connections, imuxconn);
 
@@ -1566,7 +1572,7 @@ channel_imux_flush_circ_queue(channel_imux_circuit_t *circ, or_connection_t *con
   }
 }
 
-void
+static void
 channel_imux_flush_conn_to_next_open(channel_imux_t *imuxchan, or_connection_t *conn)
 {
   tor_assert(imuxchan);
@@ -1577,7 +1583,7 @@ channel_imux_flush_conn_to_next_open(channel_imux_t *imuxchan, or_connection_t *
     if(!newconn) {
       log_warn(LD_CHANNEL, "channel %p: could not find open connection to move buf to", imuxchan);
     } else {
-      log_info(LD_CHANNEL, "channel %p: moving %d bytes from connection %p to %p [%p]", imuxchan,
+      log_info(LD_CHANNEL, "channel %p: moving %ld bytes from connection %p to %p [%p]", imuxchan,
           TO_CONN(conn)->outbuf_flushlen, conn, newconn->conn, newconn);
       buf_move_to_buf(TO_CONN(newconn->conn)->outbuf, TO_CONN(conn)->outbuf, &(TO_CONN(conn)->outbuf_flushlen));
     }
@@ -1717,10 +1723,9 @@ channel_imux_handle_var_cell(var_cell_t *var_cell, or_connection_t *conn)
  * run into the ConnLimit__, disabling us from opening any more connections
  */
 
-int channel_imux_get_chan_max_connections(channel_imux_t *imuxchan)
+static int channel_imux_get_chan_max_connections(channel_imux_t *imuxchan)
 {
   int total_active_circuits = 0;
-  circuit_t *circ;
   /* count all active circuits in the relay */
   SMARTLIST_FOREACH_BEGIN(circuit_get_global_list(), circuit_t *, circ)
   {
@@ -1781,6 +1786,8 @@ int channel_imux_get_chan_max_connections(channel_imux_t *imuxchan)
 void
 channel_imux_housekeeping(channel_t *chan, time_t now)
 {
+  (void)now;
+
   tor_assert(chan);
 
   channel_imux_t *imuxchan = BASE_CHAN_TO_IMUX(chan);

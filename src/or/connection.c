@@ -65,6 +65,7 @@
  */
 #define TOR_CHANNEL_INTERNAL_
 #define CONNECTION_PRIVATE
+#include "autotune.h"
 #include "backtrace.h"
 #include "channel.h"
 #include "channeltls.h"
@@ -578,8 +579,8 @@ connection_free_minimal(connection_t *conn)
     or_connection_t *or_conn = TO_OR_CONN(conn);
 
     if(get_options()->GlobalSchedulerUSec) {
-            global_autotune_remove_pending(or_conn);
-        }//IMUX
+      global_autotune_remove_pending(or_conn);
+    }//IMUX
 
     tor_tls_free(or_conn->tls);
     or_conn->tls = NULL;
@@ -591,9 +592,8 @@ connection_free_minimal(connection_t *conn)
       log_info(LD_CHANNEL,
                "Freeing orconn at %p, saw channel %p with ID "
                U64_FORMAT " left un-NULLed",
-               or_conn, TLS_CHAN_TO_BASE(or_conn->chan),
-               U64_PRINTF_ARG(
-                 TLS_CHAN_TO_BASE(or_conn->chan)->global_identifier));
+               or_conn, or_conn->chan,
+               U64_PRINTF_ARG(or_conn->chan->global_identifier));
                  
       channel_remove_connection(or_conn->chan, or_conn);
 
@@ -3743,6 +3743,8 @@ static int
 connection_handle_write_impl(connection_t *conn, int force,
 	    size_t ceiling, size_t* n_written_out)
 {
+  (void)n_written_out;
+
   int e;
   socklen_t len=(socklen_t)sizeof(e);
   int result;
@@ -3770,7 +3772,7 @@ connection_handle_write_impl(connection_t *conn, int force,
     if (getsockopt(conn->s, SOL_SOCKET, SO_ERROR, (void*)&e, &len) < 0) {
       log_warn(LD_BUG, "getsockopt() syscall failed");
       if (conn->type == CONN_TYPE_OR) {
-        or_connection_t *orconn = TO_OR_CONN(conn);
+        //or_connection_t *orconn = TO_OR_CONN(conn);
         //connection_or_close_for_error(orconn, 0);
       } else {
         if (CONN_IS_EDGE(conn)) {
@@ -3864,7 +3866,7 @@ connection_handle_write_impl(connection_t *conn, int force,
      * or_conn to check if it needs to geoip_change_dirreq_state() */
     /* XXXX move this to flushed_some or finished_flushing -NM */
     if (buf_datalen(conn->outbuf) == 0 && or_conn->chan)
-      channel_notify_flushed(TLS_CHAN_TO_BASE(or_conn->chan));
+      channel_notify_flushed(or_conn->chan);
 
     switch (result) {
       CASE_TOR_TLS_ERROR_ANY:
@@ -4061,7 +4063,7 @@ connection_write_to_buf_failed(connection_t *conn)
     circuit_mark_for_close(circuit_get_by_edge_conn(TO_EDGE_CONN(conn)),
                            END_CIRC_REASON_INTERNAL);
   } else if (conn->type == CONN_TYPE_OR) {
-    or_connection_t *orconn = TO_OR_CONN(conn);
+    //or_connection_t *orconn = TO_OR_CONN(conn);
     log_warn(LD_NET,
              "write_to_buf failed on an orconn; notifying of error "
              "(fd %d)", (int)(conn->s));
@@ -5327,7 +5329,7 @@ clock_skew_warning, (const connection_t *conn, long apparent_skew, int trusted,
 }
 
 
-or_connection_t* get_or_conn_from_chan(channel_t* chan) {
+or_connection_t* get_or_conn_from_chan(const channel_t* const chan) {
   if (!chan)
     return NULL;
 
@@ -5340,9 +5342,13 @@ or_connection_t* get_or_conn_from_chan(channel_t* chan) {
       /* IMPLEMENT? */
       break;
     case CHANNEL_TYPE_DUAL:
-      return TO_CONN(((channel_dual_t*)chan));
+      log_err(LD_GENERAL, "Unknown ChannelType used");
+      return NULL;
+      //return ((channel_dual_t*)chan)->conn;
     case CHANNEL_TYPE_IMUX:
-      return TO_CONN(((channel_imux_t*)chan));
+      log_err(LD_GENERAL, "Unknown ChannelType used");
+      return NULL;
+      //return ((channel_imux_t*)chan)->conn;
   }
   log_err(LD_GENERAL, "Unknown ChannelType used");
   return NULL;

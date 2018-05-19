@@ -5123,10 +5123,10 @@ directory_handle_command_post,(dir_connection_t *conn, const char *headers,
  * then return a list of int pointers defining download delays in seconds.
  * Helper function for download_status_increment_failure() and
  * download_status_reset(). */
-static const smartlist_t *
+/*static const smartlist_t *
 find_dl_schedule_and_len(download_status_t *dls, int server)
 {
-  /*switch (dls->schedule) {
+  switch (dls->schedule) {
     case DL_SCHED_GENERIC:
       if (server)
         return get_options()->TestingServerDownloadSchedule;
@@ -5141,9 +5141,9 @@ find_dl_schedule_and_len(download_status_t *dls, int server)
       return get_options()->TestingBridgeDownloadSchedule;
     default:
       tor_assert(0);
-  }*/
+  }
   return NULL;
-}
+}*/
 
 /** Called when a dirserver receives data on a directory connection;
  * looks for an HTTP request.  If the request is complete, remove it

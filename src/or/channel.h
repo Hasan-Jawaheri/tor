@@ -516,6 +516,8 @@ void channel_notify_flushed(channel_t *chan);
 /* Handle stuff we need to do on open like notifying circuits */
 void channel_do_open_actions(channel_t *chan);
 
+#else
+void channel_timestamp_active(channel_t *chan); // IMuX
 #endif /* defined(TOR_CHANNEL_INTERNAL_) */
 
 /* Helper functions to perform operations on channels */
@@ -548,7 +550,10 @@ int channel_is_better(channel_t *a, channel_t *b);
 channel_t * channel_find_by_global_id(uint64_t global_identifier);
 channel_t * channel_find_by_remote_identity(const char *rsa_id_digest,
                                             const ed25519_public_key_t *ed_id);
-int channel_get_num_channels(); //IMUX
+int channel_get_num_channels(void); //IMUX
+int channel_get_num_total_connections(void); // IMUX
+void channel_notify_conn_error(channel_t *chan, or_connection_t *conn); // IMUX
+void channel_remove_circuit(channel_t *chan, circid_t circid); // IMUX
 
 /** For things returned by channel_find_by_remote_digest(), walk the list.
  * The RSA key will match for all returned elements; the Ed25519 key might not.

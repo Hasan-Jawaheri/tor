@@ -41,6 +41,7 @@
 #include "or.h"
 #include "channel.h"
 #include "channeltls.h"
+#include "circuitlist.h"
 #include "circuitmux.h"
 #include "circuitmux_ewma.h"
 #include "command.h"
@@ -50,6 +51,7 @@
 #include "control.h"
 #include "entrynodes.h"
 #include "link_handshake.h"
+#include "main.h"
 #include "relay.h"
 #include "rephist.h"
 #include "router.h"
@@ -102,7 +104,8 @@ static int channel_tls_matches_target_method(channel_t *chan,
 static int channel_tls_num_cells_writeable_method(channel_t *chan);
 static size_t channel_tls_num_bytes_queued_method(channel_t *chan);
 static int channel_tls_write_cell_method(channel_t *chan,
-                                         cell_t *cell);
+                                         cell_t *cell,
+                                         circuit_t* circ);
 static int channel_tls_write_packed_cell_method(channel_t *chan, or_connection_t *conn, circuit_t *circ,
                                                 packed_cell_t *packed_cell);
 static int channel_tls_write_var_cell_method(channel_t *chan,
@@ -373,7 +376,7 @@ channel_tls_to_orconn(channel_tls_t *tlschan)
  * asserts.
  */
 channel_tls_t *
-channel_tls_from_base(channel_t *chan)
+channel_tls_from_base(const channel_t *chan)
 {
   if (!chan) return NULL;
 
@@ -793,8 +796,10 @@ channel_tls_num_cells_writeable_method(channel_t *chan)
  * channel_tls_t and a cell_t, transmit the cell_t.
  */
 static int
-channel_tls_write_cell_method(channel_t *chan, cell_t *cell)
+channel_tls_write_cell_method(channel_t *chan, cell_t *cell, circuit_t* circ)
 {
+  (void)circ;
+
   channel_tls_t *tlschan = BASE_CHAN_TO_TLS(chan);
   int written = 0;
 
@@ -827,6 +832,9 @@ static int
 channel_tls_write_packed_cell_method(channel_t *chan, or_connection_t *conn, circuit_t *circ,
                                      packed_cell_t *packed_cell)
 {
+  (void)conn;
+  (void)circ;
+
   tor_assert(chan);
   channel_tls_t *tlschan = BASE_CHAN_TO_TLS(chan);
   size_t cell_network_size = get_cell_network_size(chan->wide_circ_ids);
@@ -857,6 +865,8 @@ channel_tls_write_packed_cell_method(channel_t *chan, or_connection_t *conn, cir
 static int
 channel_tls_write_var_cell_method(channel_t *chan, var_cell_t *var_cell, circuit_t *circ)
 {
+  (void)circ;
+
   channel_tls_t *tlschan = BASE_CHAN_TO_TLS(chan);
   int written = 0;
 
@@ -949,8 +959,6 @@ channel_tls_handle_state_change_on_orconn(channel_t *chan,
                                           uint8_t old_state,
                                           uint8_t state)
 {
-  channel_t *base_chan;
-
   tor_assert(chan);
   tor_assert(conn);
   tor_assert(conn->chan == chan);
@@ -958,15 +966,13 @@ channel_tls_handle_state_change_on_orconn(channel_t *chan,
   /* Shut the compiler up without triggering -Wtautological-compare */
   (void)old_state;
 
-  base_chan = TLS_CHAN_TO_BASE(chan);
-
   /* Make sure the base connection state makes sense - shouldn't be error
    * or closed. */
 
-  tor_assert(CHANNEL_IS_OPENING(base_chan) ||
-             CHANNEL_IS_OPEN(base_chan) ||
-             CHANNEL_IS_MAINT(base_chan) ||
-             CHANNEL_IS_CLOSING(base_chan));
+  tor_assert(CHANNEL_IS_OPENING(chan) ||
+             CHANNEL_IS_OPEN(chan) ||
+             CHANNEL_IS_MAINT(chan) ||
+             CHANNEL_IS_CLOSING(chan));
 
   /* Did we just go to state open? */
   if (state == OR_CONN_STATE_OPEN) {
@@ -974,18 +980,18 @@ channel_tls_handle_state_change_on_orconn(channel_t *chan,
      * We can go to CHANNEL_STATE_OPEN from CHANNEL_STATE_OPENING or
      * CHANNEL_STATE_MAINT on this.
      */
-    channel_change_state_open(base_chan);
+    channel_change_state_open(chan);
     /* We might have just become writeable; check and tell the scheduler */
     if (connection_or_num_cells_writeable(conn) > 0) {
-      scheduler_channel_wants_writes(base_chan);
+      scheduler_channel_wants_writes(chan);
     }
   } else {
     /*
      * Not open, so from CHANNEL_STATE_OPEN we go to CHANNEL_STATE_MAINT,
      * otherwise no change.
      */
-    if (CHANNEL_IS_OPEN(base_chan)) {
-      channel_change_state(base_chan, CHANNEL_STATE_MAINT);
+    if (CHANNEL_IS_OPEN(chan)) {
+      channel_change_state(chan, CHANNEL_STATE_MAINT);
     }
   }
 }
@@ -1058,7 +1064,7 @@ channel_tls_handle_cell(cell_t *cell, or_connection_t *conn)
   tor_assert(cell);
   tor_assert(conn);
 
-  chan = conn->chan;
+  chan = BASE_CHAN_TO_TLS(conn->chan);
 
  if (!chan) {
    log_warn(LD_CHANNEL,
@@ -1097,8 +1103,6 @@ channel_tls_handle_cell(cell_t *cell, or_connection_t *conn)
   if (TLS_CHAN_TO_BASE(chan)->currently_padding)
     rep_hist_padding_count_read(PADDING_TYPE_ENABLED_TOTAL);
 
-  circuit_t * circ = circuit_get_by_circid_channel(cell->circ_id,conn->chan);
-
   switch (cell->command) {
     case CELL_PADDING:
       rep_hist_padding_count_read(PADDING_TYPE_CELL);
@@ -1112,11 +1116,11 @@ channel_tls_handle_cell(cell_t *cell, or_connection_t *conn)
       break;
     case CELL_NETINFO:
       ++stats_n_netinfo_cells_processed;
-      PROCESS_CELL(netinfo, cell, chan, conn);
+      PROCESS_CELL(netinfo, cell, TLS_CHAN_TO_BASE(chan), conn);
       break;
     case CELL_PADDING_NEGOTIATE:
       ++stats_n_netinfo_cells_processed;
-      PROCESS_CELL(padding_negotiate, cell, chan, conn);
+      PROCESS_CELL(padding_negotiate, cell, TLS_CHAN_TO_BASE(chan), conn);
       break;
     case CELL_CREATE:
     case CELL_CREATE_FAST:
@@ -1190,7 +1194,7 @@ channel_tls_handle_var_cell(var_cell_t *var_cell, or_connection_t *conn)
   tor_assert(var_cell);
   tor_assert(conn);
 
-  chan = conn->chan;
+  chan = BASE_CHAN_TO_TLS(conn->chan);
 
   if (!chan) {
     log_warn(LD_CHANNEL,
@@ -1246,7 +1250,7 @@ channel_tls_handle_var_cell(var_cell_t *var_cell, or_connection_t *conn)
         connection_or_close_for_error(conn, 0);
         return;
       } else {
-        if (enter_v3_handshake_with_cell(var_cell, chan, conn) < 0)
+        if (enter_v3_handshake_with_cell(var_cell, TLS_CHAN_TO_BASE(chan), conn) < 0)
           return;
       }
       break;
@@ -1292,7 +1296,7 @@ channel_tls_handle_var_cell(var_cell_t *var_cell, or_connection_t *conn)
   switch (var_cell->command) {
     case CELL_VERSIONS:
       ++stats_n_versions_cells_processed;
-      PROCESS_CELL(versions, var_cell, chan, conn);
+      PROCESS_CELL(versions, var_cell, TLS_CHAN_TO_BASE(chan), conn);
       break;
     case CELL_VPADDING:
       ++stats_n_vpadding_cells_processed;
@@ -1300,15 +1304,15 @@ channel_tls_handle_var_cell(var_cell_t *var_cell, or_connection_t *conn)
       break;
     case CELL_CERTS:
       ++stats_n_certs_cells_processed;
-      PROCESS_CELL(certs, var_cell, chan, conn);
+      PROCESS_CELL(certs, var_cell, TLS_CHAN_TO_BASE(chan), conn);
       break;
     case CELL_AUTH_CHALLENGE:
       ++stats_n_auth_challenge_cells_processed;
-      PROCESS_CELL(auth_challenge, var_cell, chan, conn);
+      PROCESS_CELL(auth_challenge, var_cell, TLS_CHAN_TO_BASE(chan), conn);
       break;
     case CELL_AUTHENTICATE:
       ++stats_n_authenticate_cells_processed;
-      PROCESS_CELL(authenticate, var_cell, chan, conn);
+      PROCESS_CELL(authenticate, var_cell, TLS_CHAN_TO_BASE(chan), conn);
       break;
     case CELL_AUTHORIZE:
       ++stats_n_authorize_cells_processed;
@@ -1390,7 +1394,7 @@ channel_tls_update_marks(or_connection_t *conn)
   tor_assert(conn);
   tor_assert(conn->chan);
 
-  chan = TLS_CHAN_TO_BASE(conn->chan);
+  chan = conn->chan;
 
   if (is_local_addr(&(TO_CONN(conn)->addr))) {
     if (!channel_is_local(chan)) {
@@ -1618,11 +1622,11 @@ channel_tls_process_versions_cell(var_cell_t *cell, channel_t *chan, or_connecti
 
     /* We set this after sending the versions cell. */
     /*XXXXX symbolic const.*/
-    TLS_CHAN_TO_BASE(chan)->wide_circ_ids =
+    chan->wide_circ_ids =
       conn->link_proto >= MIN_LINK_PROTO_FOR_WIDE_CIRC_IDS;
-    conn->wide_circ_ids = TLS_CHAN_TO_BASE(chan)->wide_circ_ids;
+    conn->wide_circ_ids = chan->wide_circ_ids;
 
-    TLS_CHAN_TO_BASE(chan)->padding_enabled =
+    chan->padding_enabled =
       conn->link_proto >= MIN_LINK_PROTO_FOR_CHANNEL_PADDING;
 
     if (send_certs) {
@@ -1680,7 +1684,7 @@ channel_tls_process_padding_negotiate_cell(cell_t *cell, channel_t *chan, or_con
     return;
   }
 
-  channelpadding_update_padding_for_channel(TLS_CHAN_TO_BASE(chan),
+  channelpadding_update_padding_for_channel(chan,
                                             negotiation);
 
   channelpadding_negotiate_free(negotiation);
@@ -1753,8 +1757,8 @@ channel_tls_process_netinfo_cell(cell_t *cell, channel_t *chan, or_connection_t 
         /* If the client never authenticated, it's a tor client or bridge
          * relay, and we must not use it for EXTEND requests (nor could we, as
          * there are no authenticated peer IDs) */
-        channel_mark_client(TLS_CHAN_TO_BASE(chan));
-        channel_set_circid_type(TLS_CHAN_TO_BASE(chan), NULL,
+        channel_mark_client(chan);
+        channel_set_circid_type(chan, NULL,
                conn->link_proto < MIN_LINK_PROTO_FOR_WIDE_CIRC_IDS);
 
         connection_or_init_conn_from_address(conn,
@@ -1792,7 +1796,7 @@ channel_tls_process_netinfo_cell(cell_t *cell, channel_t *chan, or_connection_t 
 
     if (!get_options()->BridgeRelay && me &&
         get_uint32(my_addr_ptr) == htonl(me->addr)) {
-      TLS_CHAN_TO_BASE(chan)->is_canonical_to_peer = 1;
+      chan->is_canonical_to_peer = 1;
     }
 
   } else if (my_addr_type == RESOLVED_TYPE_IPV6 && my_addr_len == 16) {
@@ -1801,7 +1805,7 @@ channel_tls_process_netinfo_cell(cell_t *cell, channel_t *chan, or_connection_t 
     if (!get_options()->BridgeRelay && me &&
         !tor_addr_is_null(&me->ipv6_addr) &&
         tor_addr_eq(&my_apparent_addr, &me->ipv6_addr)) {
-      TLS_CHAN_TO_BASE(chan)->is_canonical_to_peer = 1;
+      chan->is_canonical_to_peer = 1;
     }
   }
 
@@ -1833,10 +1837,10 @@ channel_tls_process_netinfo_cell(cell_t *cell, channel_t *chan, or_connection_t 
     --n_other_addrs;
   }
 
-  if (me && !TLS_CHAN_TO_BASE(chan)->is_canonical_to_peer &&
-      channel_is_canonical(TLS_CHAN_TO_BASE(chan))) {
+  if (me && !chan->is_canonical_to_peer &&
+      channel_is_canonical(chan)) {
     const char *descr =
-      TLS_CHAN_TO_BASE(chan)->get_remote_descr(TLS_CHAN_TO_BASE(chan), 0);
+      chan->get_remote_descr(chan, 0);
     log_info(LD_OR,
              "We made a connection to a relay at %s (fp=%s) but we think "
              "they will not consider this connection canonical. They "
@@ -2095,7 +2099,7 @@ channel_tls_process_certs_cell(var_cell_t *cell, channel_t *chan, or_connection_
    * _trying_ to connect to an authority, not necessarily if we _did_ connect
    * to one. */
   if (started_here &&
-      router_digest_is_trusted_dir(TLS_CHAN_TO_BASE(chan)->identity_digest))
+      router_digest_is_trusted_dir(chan->identity_digest))
     severity = LOG_WARN;
   else
     severity = LOG_PROTOCOL_WARN;
@@ -2129,7 +2133,7 @@ channel_tls_process_certs_cell(var_cell_t *cell, channel_t *chan, or_connection_
       }
       memcpy(conn->handshake_state->authenticated_rsa_peer_id,
              id_digests->d[DIGEST_SHA1], DIGEST_LEN);
-      channel_set_circid_type(TLS_CHAN_TO_BASE(chan), identity_rcvd,
+      channel_set_circid_type(chan, identity_rcvd,
                 conn->link_proto < MIN_LINK_PROTO_FOR_WIDE_CIRC_IDS);
       crypto_pk_free(identity_rcvd);
     }
@@ -2478,7 +2482,7 @@ channel_tls_process_authenticate_cell(var_cell_t *cell, channel_t *chan, or_conn
     memcpy(conn->handshake_state->authenticated_rsa_peer_id,
            id_digests->d[DIGEST_SHA1], DIGEST_LEN);
 
-    channel_set_circid_type(TLS_CHAN_TO_BASE(chan), identity_rcvd,
+    channel_set_circid_type(chan, identity_rcvd,
                conn->link_proto < MIN_LINK_PROTO_FOR_WIDE_CIRC_IDS);
     crypto_pk_free(identity_rcvd);
 

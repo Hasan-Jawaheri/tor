@@ -942,7 +942,7 @@ size_t
 write_to_connection(connection_t *conn, size_t ceiling, int* has_error) {
 
   LOG_FN_CONN(conn, (LOG_DEBUG, LD_NET, "socket %d wants to write. ceiling is "U64_FORMAT,
-                     (int)conn->s, ((uint64_t)ceiling)));
+                     (int)conn->s, ((long long unsigned int)ceiling)));
 
   /* assert_connection_ok(conn, time(NULL)); */
 
@@ -1247,7 +1247,7 @@ run_connection_housekeeping(int i, time_t now)
   or_conn = TO_OR_CONN(conn);
   tor_assert(conn->outbuf);
 
-  chan = TLS_CHAN_TO_BASE(or_conn->chan);
+  chan = or_conn->chan;
   tor_assert(chan);
 
   if (channel_num_circuits(chan) != 0) {
@@ -1257,7 +1257,7 @@ run_connection_housekeeping(int i, time_t now)
     have_any_circuits = 0;
   }
 
-  if (channel_is_bad_for_new_circs(TLS_CHAN_TO_BASE(or_conn->chan)) &&
+  if (channel_is_bad_for_new_circs(or_conn->chan) &&
       ! have_any_circuits) {
     /* It's bad for new circuits, and has no unmarked circuits on it:
      * mark it now. */
@@ -1790,13 +1790,14 @@ run_scheduled_events(time_t now)
   }
 
   /* 5. We do housekeeping for each connection... */
-  //IMUX
-//  channel_run_all_housekeeping(now, 1);
+  if (0) { //IMUX
+    channel_run_all_housekeeping(now, 1);
 
-//  int i;
-//  for (i=0;i<smartlist_len(connection_array);i++) {
-//    run_connection_housekeeping(i, now);
-//  }
+    int i;
+    for (i=0;i<smartlist_len(connection_array);i++) {
+      run_connection_housekeeping(i, now);
+    }
+  }
 
   /* 11b. check pending unconfigured managed proxies */
   if (!net_is_disabled() && pt_proxies_configuration_pending())

@@ -1354,7 +1354,7 @@ typedef struct connection_t {
                    * *_CONNECTION_MAGIC. */
 
   uint8_t state; /**< Current state of this connection. */
-  int type:5; /**< What kind of connection is this? */
+  int type:6; /**< What kind of connection is this? */
   unsigned int purpose:5; /**< Only used for DIR and EXIT types currently. */
 
   /* The next fields are all one-bit booleans. Some are only applicable to
@@ -4738,21 +4738,21 @@ typedef struct {
 
   
   /* when autotuning, how often we add to our bucket */
-  unsigned int AutotuneRefillUSec;
+  int AutotuneRefillUSec;
   /* when autotuning, our bucket size is how much we can send in this time */
-   unsigned int AutotuneFillLimitUSec;
+  int AutotuneFillLimitUSec;
 
-  unsigned int GlobalSchedulerUSec;
+  int GlobalSchedulerUSec;
 
   /** Type of channel to use between ORs -- TLS=1  DUAL=2  PCTCP=3  IMUX=4 */
-   int ChannelType;
+  int ChannelType;
    
   /* if set, use this as the node's bandwidth instead of auto-detecting it
      * in bytes/sercond */
-    uint64_t AutotuneWriteBWOverride;
+  uint64_t AutotuneWriteBWOverride;
 
     /* when autotuning, how often we try to write to kernel */
-      unsigned int AutotuneWriteUSec;
+  int AutotuneWriteUSec;
 
   /****
     * Parameters for the DUAL EWMA channel type

@@ -161,5 +161,7 @@ void circuitmux_mark_destroyed_circids_usable(circuitmux_t *cmux,
 MOCK_DECL(int, circuitmux_compare_muxes,
           (circuitmux_t *cmux_1, circuitmux_t *cmux_2));
 
+or_connection_t *circuitmux_choose_orconn(smartlist_t *orconn_filter);
+
 #endif /* !defined(TOR_CIRCUITMUX_H) */
 

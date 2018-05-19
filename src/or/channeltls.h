@@ -39,7 +39,7 @@ channel_t * channel_tls_handle_incoming(or_connection_t *orconn);
 /* Casts */
 or_connection_t * channel_tls_to_orconn(channel_tls_t *tlschan);
 channel_t * channel_tls_to_base(channel_tls_t *tlschan);
-channel_tls_t * channel_tls_from_base(channel_t *chan);
+channel_tls_t * channel_tls_from_base(const channel_t *chan);
 
 /* Things for connection_or.c to call back into */
 void channel_tls_handle_cell(cell_t *cell, or_connection_t *conn);

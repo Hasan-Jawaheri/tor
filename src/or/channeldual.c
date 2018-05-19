@@ -42,7 +42,7 @@ typedef struct channel_dual_circuit_t {
     circuit_t *circ;
     circid_t circ_id;
     channel_circuit_status_t status;
-    int next_sequence;
+    uint32_t next_sequence;
     smartlist_t *cell_queue;
 
     or_connection_t *readconn;
@@ -142,7 +142,7 @@ channel_dual_common_init(channel_dual_t *dualchan)
 static size_t
 channel_dual_num_bytes_queued_method(channel_t *chan)
 {
-	size_t* total_queued_size = 0;
+	size_t total_queued_size = 0;
   channel_dual_t *imuxchan = BASE_CHAN_TO_DUAL(chan);
 
   tor_assert(imuxchan);
@@ -160,7 +160,7 @@ channel_dual_num_bytes_queued_method(channel_t *chan)
 static int
 channel_dual_num_cells_writeable_method(channel_t *chan)
 {
-  size_t outbuf_len;
+  size_t outbuf_len = 0;
   ssize_t n =0;
   channel_dual_t *dualchan = BASE_CHAN_TO_DUAL(chan);
   size_t cell_network_size = 0;
@@ -262,7 +262,7 @@ channel_dual_connect(const tor_addr_t *addr, uint16_t port,
  * Create a new channel around an incoming or_connection_t
  */
 
-channel_t *
+static channel_t *
 channel_dual_create_incoming(tor_addr_t addr)
 {
   channel_dual_t *dualchan = tor_malloc_zero(sizeof(*dualchan));
@@ -671,7 +671,7 @@ channel_dual_matches_target_method(channel_t *chan,
   return tor_addr_eq(&(dualchan->addr), target);
 }
 
-channel_dual_circuit_t *channel_dual_find_circuit(channel_dual_t *dualchan, circid_t circ_id)
+static channel_dual_circuit_t *channel_dual_find_circuit(channel_dual_t *dualchan, circid_t circ_id)
 {
     tor_assert(dualchan);
 
@@ -685,7 +685,7 @@ channel_dual_circuit_t *channel_dual_find_circuit(channel_dual_t *dualchan, circ
     return NULL;
 }
 
-void
+static void
 channel_dual_update_circuit_ewma(channel_dual_t *dualchan, circid_t circ_id)
 {
     tor_assert(dualchan);
@@ -794,6 +794,8 @@ channel_dual_update_circuit_ewma(channel_dual_t *dualchan, circid_t circ_id)
 int
 channel_dual_write_cell_method(channel_t *chan, cell_t *cell, circuit_t *circ)
 {
+  (void)circ;
+
   channel_dual_t *dualchan = BASE_CHAN_TO_DUAL(chan);
 
   tor_assert(dualchan);
@@ -842,6 +844,9 @@ int
 channel_dual_write_packed_cell_method(channel_t *chan, or_connection_t *conn,
                                      circuit_t *circ, packed_cell_t *packed_cell)
 {
+  (void)circ;
+  (void)conn;
+
   channel_dual_t *dualchan = BASE_CHAN_TO_DUAL(chan);
   size_t cell_network_size = get_cell_network_size(chan->wide_circ_ids);
 
@@ -878,6 +883,8 @@ channel_dual_write_packed_cell_method(channel_t *chan, or_connection_t *conn,
 int
 channel_dual_write_var_cell_method(channel_t *chan, var_cell_t *var_cell, circuit_t *circ)
 {
+  (void)circ;
+
   channel_dual_t *dualchan = BASE_CHAN_TO_DUAL(chan);
 
   tor_assert(dualchan);
@@ -972,7 +979,7 @@ channel_dual_flush_circ_queue(channel_dual_circuit_t *circ, or_connection_t *con
 	}
 }
 
-void
+static void
 channel_dual_update_connections(channel_dual_t *dualchan, or_connection_t *readconn, 
 															 	channel_dual_circuit_t *dualcirc)
 {

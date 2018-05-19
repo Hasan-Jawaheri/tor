@@ -12,6 +12,7 @@
 #include "buffers.h"
 #define TOR_CHANNEL_INTERNAL_
 #include "channeltls.h"
+#include "connection.h"
 
 /**
  * \file scheduler.c

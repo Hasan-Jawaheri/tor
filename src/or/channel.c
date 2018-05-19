@@ -67,8 +67,10 @@
 #include "circuitlist.h"
 #include "circuitstats.h"
 #include "config.h"
+#include "connection.h"
 #include "connection_or.h" /* For var_cell_free() */
 #include "circuitmux.h"
+#include "crypto_rand.h"
 #include "entrynodes.h"
 #include "geoip.h"
 #include "hibernate.h"
@@ -721,15 +723,11 @@ channel_find_by_remote_identity(const char *rsa_id_digest,
 }
 
 
-int
-channel_get_num_channels()
-{
+int channel_get_num_channels(void) {
   return smartlist_len(active_channels);
 }
 
-int
-channel_get_num_total_connections()
-{
+int channel_get_num_total_connections(void) {
   int total = 0;
   SMARTLIST_FOREACH_BEGIN(active_channels, channel_t *, chan)
   {
@@ -759,9 +757,7 @@ channel_get_num_total_connections()
 }
 
 
-void
-channel_notify_conn_error(channel_t *chan, or_connection_t *conn)
-{
+void channel_notify_conn_error(channel_t *chan, or_connection_t *conn) {
   tor_assert(chan);
 
   switch(get_options()->ChannelType) {
@@ -3651,9 +3647,7 @@ channel_add_circuit(channel_t *chan, circuit_t *circ, circid_t circid)
     }
 }
 
-void
-channel_remove_circuit(channel_t *chan, circid_t circid)
-{
+void channel_remove_circuit(channel_t *chan, circid_t circid) {
     tor_assert(chan);
 
     log_info(LD_CHANNEL, "removing circuit %u from channel %p", circid, chan);

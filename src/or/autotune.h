@@ -69,11 +69,11 @@ struct autotune_s {
 void global_conn_write_callback(evutil_socket_t fd, short events, void *args);
 void global_autotune_conn_write_callback(or_connection_t* orc);
 void global_autotune_remove_pending(or_connection_t* orc);
-void global_autotune_free();
+void global_autotune_free(void);
 
 /* shadow intercepts these functions so dont change the signatures */
 int global_write_timer_create(unsigned int usec);
 int global_write_refill_timer_create(unsigned int usec);
-double global_autotune_get_write_speed();
+double global_autotune_get_write_speed(void);
 
 #endif /* AUTOTUNE_H_ */

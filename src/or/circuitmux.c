@@ -74,6 +74,7 @@
 #include "circuitlist.h"
 #include "circuitmux.h"
 #include "relay.h"
+#include <float.h>
 
 /*
  * Private typedefs for circuitmux.c
@@ -1358,7 +1359,6 @@ circuitmux_compare_muxes, (circuitmux_t *cmux_1, circuitmux_t *cmux_2))
   }
 }
 
-#include <float.h>
 or_connection_t *circuitmux_choose_orconn(smartlist_t *orconn_filter) {
   or_connection_t *chosen = NULL;
   double chosen_p = DBL_MAX;

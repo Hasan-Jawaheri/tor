@@ -29,7 +29,7 @@ static double timediff_seconds(struct timespec* begin, struct timespec* end) {
 
   double sec = (double) (end->tv_sec - begin->tv_sec);
   double nsec = (double) (end->tv_nsec - begin->tv_nsec);
-  return (sec + (nsec / 1000000000.0f));
+  return (sec + (nsec / 1000000000.0));
 }
 
 //static int
@@ -48,7 +48,7 @@ static double timediff_seconds(struct timespec* begin, struct timespec* end) {
 //  }
 //}
 
-void socket_stats_unref(socket_stats_t *stats) {
+static void socket_stats_unref(socket_stats_t *stats) {
   if(stats && --stats->refcount == 0) {
     tor_free(stats);
   }
@@ -226,7 +226,7 @@ static size_t global_autotune_predict_flushable(or_connection_t* orc) {
 }
 
 /* shadow intercepts this function, so dont change the signature */
-double global_autotune_get_write_speed() {
+double global_autotune_get_write_speed(void) {
   if(get_options()->AutotuneWriteBWOverride) {
     return (double)get_options()->AutotuneWriteBWOverride;
   } else {
@@ -242,7 +242,7 @@ double global_autotune_get_write_speed() {
   }
 }
 
-static void global_autotune_preupdate() {
+static void global_autotune_preupdate(void) {
   autotune.last = autotune.now;
   memset(&autotune.now, 0, sizeof(autotune_bytes_t));
   clock_gettime(CLOCK_MONOTONIC, &autotune.now.time);
@@ -283,12 +283,12 @@ static void global_autotune_conn_update(or_connection_t* orc) {
       orc->globalSchedulePending);
 }
 
-static void global_autotune_postupdate() {
+static void global_autotune_postupdate(void) {
   /* track our max write speed ever seen */
   double bytesPerSec = global_autotune_get_write_speed();
   if (bytesPerSec > autotune.bytes_per_sec) {
     autotune.bytes_per_sec = bytesPerSec;
-    autotune.bytes_per_usec = bytesPerSec / 1000000.0f;
+    autotune.bytes_per_usec = bytesPerSec / 1000000.0;
 
     log_notice(LD_GENERAL, "autotune: new max write speed is %f bytes/sec and %f bytes/usec",
         autotune.bytes_per_sec, autotune.bytes_per_usec);
@@ -336,7 +336,7 @@ static size_t global_autotune_write_to_kernel(or_connection_t* orc, int* has_err
   return totalBytesWritten;
 }
 
-static void make_sure_write_event_exists() {
+static void make_sure_write_event_exists(void) {
   if (!global_write_event_is_pending) {
     unsigned int usec = (unsigned int) get_options()->GlobalSchedulerUSec;
     global_write_event_is_pending = global_write_timer_create(usec);
@@ -353,7 +353,7 @@ static smartlist_t* global_autotune_flush_orconn_outbufs(smartlist_t* pending_or
     /* get the connection */
     or_connection_t* orc = smartlist_get(pending_orconns, 0);
     smartlist_remove(pending_orconns, orc);
-    if(orc->base_.magic != OR_CONNECTION_MAGIC || TO_CONN(orc)->type > CONN_TYPE_MAX_) {
+    if(orc->base_.magic != OR_CONNECTION_MAGIC || (uint32_t)TO_CONN(orc)->type > CONN_TYPE_MAX_) {
       /* connection was freed */
       // TODO we should do this before its destroyed
       continue;
@@ -460,7 +460,7 @@ static void global_autotune_schedule_orconns(smartlist_t* eligible_orconns) {
       break;
 
     /* check to make sure the orconn hasn't been freed */
-    if(chosen_orconn->base_.magic != OR_CONNECTION_MAGIC || TO_CONN(chosen_orconn)->type > CONN_TYPE_MAX_) {
+    if(chosen_orconn->base_.magic != OR_CONNECTION_MAGIC || (uint32_t)TO_CONN(chosen_orconn)->type > CONN_TYPE_MAX_) {
       smartlist_remove(eligible_orconns, chosen_orconn);
       continue;
     }
@@ -564,8 +564,10 @@ static void global_autotune_schedule_orconns(smartlist_t* eligible_orconns) {
 }
 
 /* libevent callback signature */
-void global_conn_write_callback(evutil_socket_t fd, short events,
-    void *args) {
+void global_conn_write_callback(evutil_socket_t fd, short events, void *args) {
+  (void)fd;
+  (void)events;
+  (void)args;
   /* there is no longer a global write event scheduled */
   global_write_event_is_pending = 0;
   if (global_write_event) {
@@ -660,14 +662,18 @@ int global_write_timer_create(unsigned int usec) {
   return 1; // there is an event pending
 }
 
-void global_write_refill_callback(evutil_socket_t fd, short events, void *args) {
+static void global_write_refill_callback(evutil_socket_t fd, short events, void *args) {
+  (void)fd;
+  (void)events;
+  (void)args;
+
   double refill_usec = (double)get_options()->AutotuneRefillUSec;
   double refill_tokens = refill_usec * autotune.bytes_per_usec;
 
   autotune.global_tokens += refill_tokens;
 
   /* if we've collected more than 1 byte worth of tokens, update limit */
-  if(autotune.global_tokens >= 16384.0f) {
+  if(autotune.global_tokens >= 16384.0) {
     size_t new_tokens = (size_t)autotune.global_tokens;
     autotune.global_limit += new_tokens;
     autotune.global_tokens -= (double)new_tokens;
@@ -746,7 +752,7 @@ void global_autotune_remove_pending(or_connection_t* orc) {
   }
 }
 
-void global_autotune_free() {
+void global_autotune_free(void) {
   if(pending_write_connection_lst) {
     smartlist_free(pending_write_connection_lst);
     pending_write_connection_lst = NULL;
