@@ -223,6 +223,8 @@ circuit_receive_relay_cell(cell_t *cell, circuit_t *circ,
   char recognized=0;
   int reason;
 
+log_notice(LD_OR, "circuit_receive_relay_cell dir=%s", cell_direction == CELL_DIRECTION_OUT ? "OUT" : "IN");
+
   tor_assert(cell);
   tor_assert(circ);
   tor_assert(cell_direction == CELL_DIRECTION_OUT ||
@@ -232,7 +234,7 @@ circuit_receive_relay_cell(cell_t *cell, circuit_t *circ,
 
   if (relay_decrypt_cell(circ, cell, cell_direction, &layer_hint, &recognized)
       < 0) {
-    log_fn(LOG_PROTOCOL_WARN, LD_PROTOCOL,
+    log_notice(LD_PROTOCOL,
            "relay crypt failed. Dropping connection.");
     return -END_CIRC_REASON_INTERNAL;
   }
@@ -240,6 +242,7 @@ circuit_receive_relay_cell(cell_t *cell, circuit_t *circ,
   circuit_update_channel_usage(circ, cell);
 
   if (recognized) {
+log_notice(LD_OR, "recognized");
     edge_connection_t *conn = NULL;
 
     if (circ->purpose == CIRCUIT_PURPOSE_PATH_BIAS_TESTING) {
@@ -253,10 +256,10 @@ circuit_receive_relay_cell(cell_t *cell, circuit_t *circ,
     conn = relay_lookup_conn(circ, cell, cell_direction, layer_hint);
     if (cell_direction == CELL_DIRECTION_OUT) {
       ++stats_n_relay_cells_delivered;
-      log_debug(LD_OR,"Sending away from origin.");
+      log_notice(LD_OR,"Sending away from origin.");
       if ((reason=connection_edge_process_relay_cell(cell, circ, conn, NULL))
           < 0) {
-        log_fn(LOG_PROTOCOL_WARN, LD_PROTOCOL,
+        log_notice(LD_PROTOCOL,
                "connection_edge_process_relay_cell (away from origin) "
                "failed.");
         return reason;
@@ -264,7 +267,7 @@ circuit_receive_relay_cell(cell_t *cell, circuit_t *circ,
     }
     if (cell_direction == CELL_DIRECTION_IN) {
       ++stats_n_relay_cells_delivered;
-      log_debug(LD_OR,"Sending to origin.");
+      log_notice(LD_OR,"Sending to origin.");
       if ((reason = connection_edge_process_relay_cell(cell, circ, conn,
                                                        layer_hint)) < 0) {
         /* If a client is trying to connect to unknown hidden service port,
@@ -280,6 +283,8 @@ circuit_receive_relay_cell(cell_t *cell, circuit_t *circ,
     return 0;
   }
 
+log_notice(LD_OR, "not recognized :o");
+
   /* not recognized. pass it on. */
   if (cell_direction == CELL_DIRECTION_OUT) {
     cell->circ_id = circ->n_circ_id; /* switch it */
@@ -288,7 +293,7 @@ circuit_receive_relay_cell(cell_t *cell, circuit_t *circ,
     cell->circ_id = TO_OR_CIRCUIT(circ)->p_circ_id; /* switch it */
     chan = TO_OR_CIRCUIT(circ)->p_chan;
   } else {
-    log_fn(LOG_PROTOCOL_WARN, LD_OR,
+    log_notice(LD_OR,
            "Dropping unrecognized inbound cell on origin circuit.");
     /* If we see unrecognized cells on path bias testing circs,
      * it's bad mojo. Those circuits need to die.
@@ -321,12 +326,12 @@ circuit_receive_relay_cell(cell_t *cell, circuit_t *circ,
       }
       return 0;
     }
-    log_fn(LOG_PROTOCOL_WARN, LD_PROTOCOL,
+    log_notice(LD_PROTOCOL,
            "Didn't recognize cell, but circ stops here! Closing circ.");
     return -END_CIRC_REASON_TORPROTOCOL;
   }
 
-  log_debug(LD_OR,"Passing on unrecognized cell.");
+  log_notice(LD_OR,"Passing on unrecognized cell.");
 
   ++stats_n_relay_cells_relayed; /* XXXX no longer quite accurate {cells}
                                   * we might kill the circ before we relay
@@ -1418,11 +1423,11 @@ connection_edge_process_relay_cell(cell_t *cell, circuit_t *circ,
   relay_header_unpack(&rh, cell->payload);
 //  log_fn(LOG_DEBUG,"command %d stream %d", rh.command, rh.stream_id);
   num_seen++;
-  log_debug(domain, "Now seen %d relay cells here (command %d, stream %d).",
+  log_notice(domain, "Now seen %d relay cells here (command %d, stream %d).",
             num_seen, rh.command, rh.stream_id);
 
   if (rh.length > RELAY_PAYLOAD_SIZE) {
-    log_fn(LOG_PROTOCOL_WARN, LD_PROTOCOL,
+    log_notice(LD_PROTOCOL,
            "Relay cell length field too long. Closing circuit.");
     return - END_CIRC_REASON_TORPROTOCOL;
   }
@@ -1435,7 +1440,7 @@ connection_edge_process_relay_cell(cell_t *cell, circuit_t *circ,
       case RELAY_COMMAND_RESOLVE:
       case RELAY_COMMAND_RESOLVED:
       case RELAY_COMMAND_BEGIN_DIR:
-        log_fn(LOG_PROTOCOL_WARN, LD_PROTOCOL, "Relay command %d with zero "
+        log_notice(LD_PROTOCOL, "Relay command %d with zero "
                "stream_id. Dropping.", (int)rh.command);
         return 0;
       default:
@@ -1459,6 +1464,7 @@ connection_edge_process_relay_cell(cell_t *cell, circuit_t *circ,
       log_warn(LD_BUG, "Somehow I had a connection that matched a "
                "data cell with stream ID 0.");
     } else {
+log_notice(LD_OR, "will call connection_edge_process_relay_cell_not_open");
       return connection_edge_process_relay_cell_not_open(
                &rh, cell, circ, conn, layer_hint);
     }
@@ -1467,25 +1473,25 @@ connection_edge_process_relay_cell(cell_t *cell, circuit_t *circ,
   switch (rh.command) {
     case RELAY_COMMAND_DROP:
       rep_hist_padding_count_read(PADDING_TYPE_DROP);
-//      log_info(domain,"Got a relay-level padding cell. Dropping.");
+      log_notice(domain,"Got a relay-level padding cell. Dropping.");
       return 0;
     case RELAY_COMMAND_BEGIN:
     case RELAY_COMMAND_BEGIN_DIR:
       if (layer_hint &&
           circ->purpose != CIRCUIT_PURPOSE_S_REND_JOINED) {
-        log_fn(LOG_PROTOCOL_WARN, LD_APP,
+        log_notice(LD_APP,
                "Relay begin request unsupported at AP. Dropping.");
         return 0;
       }
       if (circ->purpose == CIRCUIT_PURPOSE_S_REND_JOINED &&
           layer_hint != TO_ORIGIN_CIRCUIT(circ)->cpath->prev) {
-        log_fn(LOG_PROTOCOL_WARN, LD_APP,
+        log_notice(LD_APP,
                "Relay begin request to Hidden Service "
                "from intermediary node. Dropping.");
         return 0;
       }
       if (conn) {
-        log_fn(LOG_PROTOCOL_WARN, domain,
+        log_notice(domain,
                "Begin cell for known stream. Dropping.");
         return 0;
       }
@@ -1500,12 +1506,13 @@ connection_edge_process_relay_cell(cell_t *cell, circuit_t *circ,
         TO_OR_CIRCUIT(circ)->p_chan->dirreq_id = circ->dirreq_id;
       }
 
+log_notice(LD_OR, "going to connection_exit_begin_conn");
       return connection_exit_begin_conn(cell, circ);
     case RELAY_COMMAND_DATA:
       ++stats_n_data_cells_received;
       if (( layer_hint && --layer_hint->deliver_window < 0) ||
           (!layer_hint && --circ->deliver_window < 0)) {
-        log_fn(LOG_PROTOCOL_WARN, LD_PROTOCOL,
+        log_notice(LD_PROTOCOL,
                "(relay data) circ deliver_window below 0. Killing.");
         if (conn) {
           /* XXXX Do we actually need to do this?  Will killing the circuit
@@ -1515,23 +1522,23 @@ connection_edge_process_relay_cell(cell_t *cell, circuit_t *circ,
         }
         return -END_CIRC_REASON_TORPROTOCOL;
       }
-      log_debug(domain,"circ deliver_window now %d.", layer_hint ?
+      log_notice(domain,"circ deliver_window now %d.", layer_hint ?
                 layer_hint->deliver_window : circ->deliver_window);
 
       circuit_consider_sending_sendme(circ, layer_hint);
 
       if (rh.stream_id == 0) {
-        log_fn(LOG_PROTOCOL_WARN, LD_PROTOCOL, "Relay data cell with zero "
+        log_notice(LD_PROTOCOL, "Relay data cell with zero "
                "stream_id. Dropping.");
         return 0;
       } else if (!conn) {
-        log_info(domain,"data cell dropped, unknown stream (streamid %d).",
+        log_notice(domain,"data cell dropped, unknown stream (streamid %d).",
                  rh.stream_id);
         return 0;
       }
 
       if (--conn->deliver_window < 0) { /* is it below 0 after decrement? */
-        log_fn(LOG_PROTOCOL_WARN, LD_PROTOCOL,
+        log_notice(LD_PROTOCOL,
                "(relay data) conn deliver_window below 0. Killing.");
         return -END_CIRC_REASON_TORPROTOCOL;
       }
@@ -1539,7 +1546,7 @@ connection_edge_process_relay_cell(cell_t *cell, circuit_t *circ,
       stats_n_data_bytes_received += rh.length;
       connection_buf_add((char*)(cell->payload + RELAY_HEADER_SIZE),
                               rh.length, TO_CONN(conn));
-
+log_notice(LD_OR, "called connection_buf_add");
 #ifdef MEASUREMENTS_21206
       /* Count number of RELAY_DATA cells received on a linked directory
        * connection. */
@@ -1562,12 +1569,12 @@ connection_edge_process_relay_cell(cell_t *cell, circuit_t *circ,
       reason = rh.length > 0 ?
         get_uint8(cell->payload+RELAY_HEADER_SIZE) : END_STREAM_REASON_MISC;
       if (!conn) {
-        log_info(domain,"end cell (%s) dropped, unknown stream.",
+        log_notice(domain,"end cell (%s) dropped, unknown stream.",
                  stream_end_reason_to_string(reason));
         return 0;
       }
 /* XXX add to this log_fn the exit node's nickname? */
-      log_info(domain,TOR_SOCKET_T_FORMAT": end cell (%s) for stream %d. "
+      log_notice(domain,TOR_SOCKET_T_FORMAT": end cell (%s) for stream %d. "
                "Removing stream.",
                conn->base_.s,
                stream_end_reason_to_string(reason),
@@ -1591,15 +1598,17 @@ connection_edge_process_relay_cell(cell_t *cell, circuit_t *circ,
       return 0;
     case RELAY_COMMAND_EXTEND:
     case RELAY_COMMAND_EXTEND2: {
+log_notice(LD_OR, "RELAY COMMAND EXTEND-");
       static uint64_t total_n_extend=0, total_nonearly=0;
       total_n_extend++;
       if (rh.stream_id) {
-        log_fn(LOG_PROTOCOL_WARN, domain,
+        log_notice(domain,
                "'extend' cell received for non-zero stream. Dropping.");
         return 0;
       }
       if (cell->command != CELL_RELAY_EARLY &&
           !networkstatus_get_param(NULL,"AllowNonearlyExtend",0,0,1)) {
+log_notice(LD_OR, "in the non early extend");
 #define EARLY_WARNING_INTERVAL 3600
         static ratelim_t early_warning_limit =
           RATELIM_INIT(EARLY_WARNING_INTERVAL);
@@ -1609,7 +1618,7 @@ connection_edge_process_relay_cell(cell_t *cell, circuit_t *circ,
           if ((m = rate_limit_log(&early_warning_limit, approx_time()))) {
             double percentage = ((double)total_nonearly)/total_n_extend;
             percentage *= 100;
-            log_fn(LOG_PROTOCOL_WARN, domain, "EXTEND cell received, "
+            log_notice(domain, "EXTEND cell received, "
                    "but not via RELAY_EARLY. Dropping.%s", m);
             log_fn(LOG_PROTOCOL_WARN, domain, "  (We have dropped %.02f%% of "
                    "all EXTEND cells for this reason)", percentage);
@@ -1622,16 +1631,18 @@ connection_edge_process_relay_cell(cell_t *cell, circuit_t *circ,
         }
         return 0;
       }
+log_notice(LD_OR, "going to circuit_extend");
       return circuit_extend(cell, circ);
     }
     case RELAY_COMMAND_EXTENDED:
     case RELAY_COMMAND_EXTENDED2:
+
       if (!layer_hint) {
         log_fn(LOG_PROTOCOL_WARN, LD_PROTOCOL,
                "'extended' unsupported at non-origin. Dropping.");
         return 0;
       }
-      log_debug(domain,"Got an extended cell! Yay.");
+      log_notice(domain,"Got an extended cell! Yay.");
       {
         extended_cell_t extended_cell;
         if (extended_cell_parse(&extended_cell, rh.command,

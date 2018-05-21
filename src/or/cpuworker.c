@@ -429,12 +429,12 @@ cpuworker_onion_handshake_threadfn(void *state_, void *work_)
                                   rpl.rend_auth_material);
   if (n < 0) {
     /* failure */
-    log_debug(LD_OR,"onion_skin_server_handshake failed.");
+    log_notice(LD_OR,"CIRCUIT onion_skin_server_handshake failed.");
     memset(&rpl, 0, sizeof(rpl));
     rpl.success = 0;
   } else {
     /* success */
-    log_debug(LD_OR,"onion_skin_server_handshake succeeded.");
+    log_notice(LD_OR,"CIRCUIT onion_skin_server_handshake succeeded.");
     cell_out->handshake_len = n;
     switch (cc->cell_type) {
     case CELL_CREATE:

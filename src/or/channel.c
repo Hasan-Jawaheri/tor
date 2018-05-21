@@ -2657,6 +2657,8 @@ channel_get_for_extend(const char *rsa_id_digest,
   int n_inprogress_goodaddr = 0, n_old = 0;
   int n_noncanonical = 0;
 
+log_notice(LD_OR, "inside channel_get_for_extend");
+
   tor_assert(msg_out);
   tor_assert(launch_out);
 

@@ -117,7 +117,8 @@ channel_outbuf_length(channel_t *chan)
   if (SCHED_BUG(get_or_conn_from_chan(chan) == NULL, chan)) {
     return 0;
   }
-  return buf_datalen(TO_CONN(get_or_conn_from_chan(chan))->outbuf);
+  return chan->num_bytes_queued ? chan->num_bytes_queued(chan) : 0;
+  //return buf_datalen(TO_CONN(get_or_conn_from_chan(chan))->outbuf);
 }
 
 /* Little helper function for HT_FOREACH_FN. */

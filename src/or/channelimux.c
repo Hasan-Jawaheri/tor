@@ -89,7 +89,6 @@ static int channel_imux_get_chan_max_connections(channel_imux_t *imuxchan);
  * Do parts of channel_imux_t initialization common to channel_imux_connect()
  * and channel_imux_handle_incoming().
  */
-
 static void
 channel_imux_common_init(channel_imux_t *imuxchan)
 {
@@ -181,11 +180,21 @@ channel_imux_create_connection(channel_imux_t *imuxchan)
     or_connection_t *conn;
 
     imuxchan->newconn = &(conn);
-    conn = connection_or_connect(&(imuxchan->addr), imuxchan->port, imuxchan->id_digest, &chan->ed25519_identity, chan);
 
-    if (!conn) {
-        return NULL;
-    }
+/*    channel_imux_connection_t *imuxconn = tor_malloc_zero(sizeof(*imuxconn));
+    imuxconn->conn = NULL;
+    imuxconn->ewma.ewma_val = 1;
+    imuxconn->create_time = time(NULL);
+    smartlist_add(imuxchan->connections, imuxconn);*/
+
+    conn = connection_or_connect(&(imuxchan->addr), imuxchan->port, imuxchan->id_digest, &chan->ed25519_identity, chan);
+log_notice(LD_OR, "orconn ended up being 0x%p", conn);
+  if (!conn) {
+//    smartlist_remove(imuxchan->connections, imuxconn);
+ //   tor_free(imuxconn);
+    return NULL;
+  }// else
+    //imuxconn->conn = conn;
 
     channel_imux_connection_t *imuxconn = tor_malloc_zero(sizeof(*imuxconn));
     imuxconn->conn = conn;
@@ -496,7 +505,7 @@ channel_imux_from_base(channel_t *chan)
 {
   if (!chan) return NULL;
 
-  tor_assert(chan->magic == IMUX_CHAN_MAGIC);
+  //tor_assert(chan->magic == IMUX_CHAN_MAGIC);
 
   return (channel_imux_t *)(chan);
 }
@@ -1335,7 +1344,7 @@ channel_imux_write_packed_cell_method(channel_t *chan, or_connection_t *conn,
   channel_imux_t *imuxchan = BASE_CHAN_TO_IMUX(chan);
 
   cell_t cell;
-  channel_imux_cell_unpack(&cell, packed_cell->body, chan->wide_circ_ids);
+  channel_imux_cell_unpack(&cell, packed_cell->body, 1);
 
   relay_header_t rh;
   relay_header_unpack(&rh, cell.payload);
@@ -1420,7 +1429,7 @@ channel_imux_write_var_cell_method(channel_t *chan, var_cell_t *var_cell, circui
     channel_imux_update_circuit_ewma(imuxchan, imuxcirc);
 
   channel_imux_connection_t *imuxconn = channel_imux_get_write_connection(imuxchan, imuxcirc, var_cell->command);
-  if(!imuxconn) 
+  if(!imuxconn)
   {
       log_warn(LD_CHANNEL, "channel %p: could not find connection to schedule cell on circuit %u (%d connections)", imuxchan,
           var_cell->circ_id, smartlist_len(imuxchan->connections));
@@ -1458,8 +1467,10 @@ channel_imux_find_imux_connection(channel_t *chan, or_connection_t *conn)
   {
 //	  log_info(LD_BUG, "Lamiaa--: Finding connection conn %p in imuxconn->conn %p \n", imuxconn->conn, conn);
 
-    if(imuxconn->conn == conn)
+    if(imuxconn->conn == conn){// || imuxconn->conn == NULL) {
+      //imuxconn->conn = conn;
       return imuxconn;
+    }
   }
   SMARTLIST_FOREACH_END(imuxconn);
 
@@ -1521,7 +1532,7 @@ channel_imux_handle_state_change_on_orconn(channel_t *chan, or_connection_t *con
     /* if this is the first conneciton to open, mark channel open as well */
     if(chan->state != CHANNEL_STATE_OPEN) {
           imuxchan->controlconn = conn;
-          channel_change_state(chan, CHANNEL_STATE_OPEN);
+          channel_change_state_open(chan);
 
           imuxchan->is_canonical = conn->is_canonical;
           imuxchan->link_proto = conn->link_proto;
@@ -1537,7 +1548,7 @@ channel_imux_handle_state_change_on_orconn(channel_t *chan, or_connection_t *con
     log_info(LD_CHANNEL, "channel %p: (close) has %d open connections [%p]", imuxchan, imuxchan->num_open_connections, conn);
   }
 
-
+  //channel_tls_handle_state_change_on_orconn(chan, conn, old_state, state);
 }
 
 static int
@@ -1780,7 +1791,7 @@ static int channel_imux_get_chan_max_connections(channel_imux_t *imuxchan)
       channel_active_circuits, total_active_circuits, channel_n_conns, smartlist_len(imuxchan->open_connections), channel_max_conns,
       total_n_conns, total_max_conns, imuxchan->opening_connections);
 
-  return channel_max_conns;
+  return 100;//channel_max_conns;
 }
 
 void

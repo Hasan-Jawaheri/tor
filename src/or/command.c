@@ -286,7 +286,7 @@ command_process_create_cell(cell_t *cell, channel_t *chan)
   tor_assert(cell);
   tor_assert(chan);
 
-  log_debug(LD_OR,
+  log_notice(LD_OR,
             "Got a CREATE cell for circ_id %u on channel " U64_FORMAT
             " (%p)",
             (unsigned)cell->circ_id,
@@ -301,7 +301,7 @@ command_process_create_cell(cell_t *cell, channel_t *chan)
    * we check for the conditions that would make us send a DESTROY back,
    * since those conditions would make a DESTROY nonsensical. */
   if (cell->circ_id == 0) {
-    log_fn(LOG_PROTOCOL_WARN, LD_PROTOCOL,
+    log_warn(LD_PROTOCOL,
            "Received a create cell (type %d) from %s with zero circID; "
            " ignoring.", (int)cell->command,
            channel_get_actual_remote_descr(chan));
@@ -310,14 +310,14 @@ command_process_create_cell(cell_t *cell, channel_t *chan)
 
   if (circuit_id_in_use_on_channel(cell->circ_id, chan)) {
     const node_t *node = node_get_by_id(chan->identity_digest);
-    log_fn(LOG_PROTOCOL_WARN, LD_PROTOCOL,
+    log_warn(LD_PROTOCOL,
            "Received CREATE cell (circID %u) for known circ. "
            "Dropping (age %d).",
            (unsigned)cell->circ_id,
            (int)(time(NULL) - channel_when_created(chan)));
     if (node) {
       char *p = esc_for_log(node_get_platform(node));
-      log_fn(LOG_PROTOCOL_WARN, LD_PROTOCOL,
+      log_warn(LD_PROTOCOL,
              "Details: router %s, platform %s.",
              node_describe(node), p);
       tor_free(p);
@@ -326,7 +326,7 @@ command_process_create_cell(cell_t *cell, channel_t *chan)
   }
 
   if (we_are_hibernating()) {
-    log_info(LD_OR,
+    log_notice(LD_OR,
              "Received create cell but we're shutting down. Sending back "
              "destroy.");
     channel_send_destroy(cell->circ_id, chan,
@@ -343,7 +343,7 @@ command_process_create_cell(cell_t *cell, channel_t *chan)
 
   if (!server_mode(options) ||
       (!public_server_mode(options) && channel_is_outgoing(chan))) {
-    log_fn(LOG_PROTOCOL_WARN, LD_PROTOCOL,
+    log_warn(LD_PROTOCOL,
            "Received create cell (type %d) from %s, but we're connected "
            "to it as a client. "
            "Sending back a destroy.",
@@ -355,27 +355,31 @@ command_process_create_cell(cell_t *cell, channel_t *chan)
 
   /* If the high bit of the circuit ID is not as expected, close the
    * circ. */
+//log_notice(LD_GENERAL, "RECEIVED CIRCUIT ID 0x%X (wide_circ_ids: %d)", cell->circ_id, cell->wide_Circ_ids);
   if (chan->wide_circ_ids)
     id_is_high = cell->circ_id & (1u<<31);
   else
     id_is_high = cell->circ_id & (1u<<15);
+log_notice(LD_GENERAL, "RECEIVED CIRCUIT ID 0x%X (chan->wide_circ_ids: %d, id_is_high: %d, chan->circ_id_type is %s)",
+ cell->circ_id, chan->wide_circ_ids, id_is_high, chan->circ_id_type == CIRC_ID_TYPE_HIGHER ? "HIGH" : "LOW");
   if ((id_is_high &&
        chan->circ_id_type == CIRC_ID_TYPE_HIGHER) ||
       (!id_is_high &&
        chan->circ_id_type == CIRC_ID_TYPE_LOWER)) {
-    log_fn(LOG_PROTOCOL_WARN, LD_PROTOCOL,
+    log_warn(LD_PROTOCOL,
            "Received create cell with unexpected circ_id %u. Closing.",
            (unsigned)cell->circ_id);
     channel_send_destroy(cell->circ_id, chan,
                          END_CIRC_REASON_TORPROTOCOL);
     return;
-  }
+  } else
+log_notice(LD_GENERAL, "CIRCUIT SEEMS GUUD");
   
   //IMUX
   if (circuit_id_in_use_on_channel(cell->circ_id, chan)) {
     const node_t *node = node_get_by_id(chan->identity_digest);
-    log_fn(LOG_PROTOCOL_WARN, LD_PROTOCOL,
-           "Received CREATE cell (circID %u) for known circ. "
+    log_notice(LD_PROTOCOL,
+           "CIRCUIT Received CREATE cell (circID %u) for known circ. "
            "Dropping (age %d).",
            (unsigned)cell->circ_id,
            (int)(time(NULL) - channel_when_created(chan)));
@@ -395,7 +399,7 @@ command_process_create_cell(cell_t *cell, channel_t *chan)
   create_cell = tor_malloc_zero(sizeof(create_cell_t));
   if (create_cell_parse(create_cell, cell) < 0) {
     tor_free(create_cell);
-    log_fn(LOG_PROTOCOL_WARN, LD_OR,
+    log_notice(LD_OR,
            "Bogus/unrecognized create cell; closing.");
     circuit_mark_for_close(TO_CIRCUIT(circ), END_CIRC_REASON_TORPROTOCOL);
     return;
@@ -411,11 +415,11 @@ command_process_create_cell(cell_t *cell, channel_t *chan)
     /* hand it off to the cpuworkers, and then return. */
 
     if (assign_onionskin_to_cpuworker(circ, create_cell) < 0) {
-      log_debug(LD_GENERAL,"Failed to hand off onionskin. Closing.");
+      log_notice(LD_GENERAL,"Failed to hand off onionskin. Closing.");
       circuit_mark_for_close(TO_CIRCUIT(circ), END_CIRC_REASON_RESOURCELIMIT);
       return;
     }
-    log_debug(LD_OR,"success: handed off onionskin.");
+    log_notice(LD_OR,"CIRCUIT success: handed off onionskin.");
   } else {
     /* This is a CREATE_FAST cell; we can handle it immediately without using
      * a CPU worker. */
@@ -468,22 +472,24 @@ command_process_created_cell(cell_t *cell, channel_t *chan)
 
   circ = circuit_get_by_circid_channel(cell->circ_id, chan);
 
+log_notice(LD_OR, "GOT CIRCUIT CREATED (0x%p)", circ);
+
   if (!circ) {
-    log_info(LD_OR,
+    log_notice(LD_OR,
              "(circID %u) unknown circ (probably got a destroy earlier). "
              "Dropping.", (unsigned)cell->circ_id);
     return;
   }
 
   if (circ->n_circ_id != cell->circ_id || circ->n_chan != chan) {
-    log_fn(LOG_PROTOCOL_WARN,LD_PROTOCOL,
+    log_notice(LD_PROTOCOL,
            "got created cell from Tor client? Closing.");
     circuit_mark_for_close(circ, END_CIRC_REASON_TORPROTOCOL);
     return;
   }
 
   if (created_cell_parse(&extended_cell.created_cell, cell) < 0) {
-    log_fn(LOG_PROTOCOL_WARN, LD_OR, "Unparseable created cell.");
+    log_notice(LD_OR, "Unparseable created cell.");
     circuit_mark_for_close(circ, END_CIRC_REASON_TORPROTOCOL);
     return;
   }
@@ -491,15 +497,15 @@ command_process_created_cell(cell_t *cell, channel_t *chan)
   if (CIRCUIT_IS_ORIGIN(circ)) { /* we're the OP. Handshake this. */
     origin_circuit_t *origin_circ = TO_ORIGIN_CIRCUIT(circ);
     int err_reason = 0;
-    log_debug(LD_OR,"at OP. Finishing handshake.");
+    log_notice(LD_OR,"at OP. Finishing handshake.");
     if ((err_reason = circuit_finish_handshake(origin_circ,
                                         &extended_cell.created_cell)) < 0) {
       circuit_mark_for_close(circ, -err_reason);
       return;
     }
-    log_debug(LD_OR,"Moving to next skin.");
+    log_notice(LD_OR,"Moving to next skin.");
     if ((err_reason = circuit_send_next_onion_skin(origin_circ)) < 0) {
-      log_info(LD_OR,"circuit_send_next_onion_skin failed.");
+      log_notice(LD_OR,"circuit_send_next_onion_skin failed.");
       /* XXX push this circuit_close lower */
       circuit_mark_for_close(circ, -err_reason);
       return;
@@ -508,7 +514,7 @@ command_process_created_cell(cell_t *cell, channel_t *chan)
     uint8_t command=0;
     uint16_t len=0;
     uint8_t payload[RELAY_PAYLOAD_SIZE];
-    log_debug(LD_OR,
+    log_notice(LD_OR,
               "Converting created cell to extended relay cell, sending.");
     memset(payload, 0, sizeof(payload));
     if (extended_cell.created_cell.cell_type == CELL_CREATED2)
@@ -539,8 +545,10 @@ command_process_relay_cell(cell_t *cell, channel_t *chan)
 
   circ = circuit_get_by_circid_channel(cell->circ_id, chan);
 
+log_notice(LD_OR, "GOT A RELAY CELL ON CIRC 0x%p", circ);
+
   if (!circ) {
-    log_debug(LD_OR,
+    log_notice(LD_OR,
               "unknown circuit %u on connection from %s. Dropping.",
               (unsigned)cell->circ_id,
               channel_get_canonical_remote_descr(chan));
@@ -548,12 +556,13 @@ command_process_relay_cell(cell_t *cell, channel_t *chan)
   }
 
   if (circ->state == CIRCUIT_STATE_ONIONSKIN_PENDING) {
-    log_fn(LOG_PROTOCOL_WARN,LD_PROTOCOL,"circuit in create_wait. Closing.");
+    log_notice(LD_PROTOCOL,"circuit in create_wait. Closing.");
     circuit_mark_for_close(circ, END_CIRC_REASON_TORPROTOCOL);
     return;
   }
 
   if (CIRCUIT_IS_ORIGIN(circ)) {
+log_notice(LD_CIRC, "im origin baby");
     /* if we're a relay and treating connections with recent local
      * traffic better, then this is one of them. */
     channel_timestamp_client(chan);
@@ -584,7 +593,7 @@ command_process_relay_cell(cell_t *cell, channel_t *chan)
       /* Inbound early cells could once be encountered as a result of
        * bug 1038; but relays running versions before 0.2.1.19 are long
        * gone from the network, so any such cells now are surprising. */
-      log_warn(LD_OR,
+      log_notice(LD_OR,
                "Received an inbound RELAY_EARLY cell on circuit %u."
                " Closing circuit. Please report this event,"
                " along with the following message.",
@@ -600,7 +609,7 @@ command_process_relay_cell(cell_t *cell, channel_t *chan)
     } else {
       or_circuit_t *or_circ = TO_OR_CIRCUIT(circ);
       if (or_circ->remaining_relay_early_cells == 0) {
-        log_fn(LOG_PROTOCOL_WARN, LD_OR,
+        log_notice(LD_OR,
                "Received too many RELAY_EARLY cells on circ %u from %s."
                "  Closing circuit.",
                (unsigned)cell->circ_id,

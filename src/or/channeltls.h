@@ -29,6 +29,8 @@ typedef struct channel_tls_s {
 
 #endif /* defined(TOR_CHANNEL_INTERNAL_) */
 
+void channel_tls_common_init(channel_tls_t *tlschan);
+
 channel_t * channel_tls_connect(const tor_addr_t *addr, uint16_t port,
                                 const char *id_digest,
                                 const ed25519_public_key_t *ed_id);
@@ -74,7 +76,7 @@ STATIC void channel_tls_process_certs_cell(var_cell_t *cell,
 STATIC void channel_tls_process_auth_challenge_cell(var_cell_t *cell,
                                                     channel_t *chan,
                                                     or_connection_t *conn);
-STATIC void channel_tls_common_init(channel_tls_t *tlschan);
+void channel_tls_common_init(channel_tls_t *tlschan);
 STATIC void channel_tls_process_authenticate_cell(var_cell_t *cell,
                                                   channel_t *chan,
                                                   or_connection_t *conn);

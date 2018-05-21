@@ -134,7 +134,7 @@ static void channel_tls_process_padding_negotiate_cell(cell_t *cell,
  * Do parts of channel_tls_t initialization common to channel_tls_connect()
  * and channel_tls_handle_incoming().
  */
-STATIC void
+void
 channel_tls_common_init(channel_tls_t *tlschan)
 {
   channel_t *chan;
@@ -380,8 +380,8 @@ channel_tls_from_base(const channel_t *chan)
 {
   if (!chan) return NULL;
 
-  //if(chan->type != CHANNEL_TYPE_IMUX)
-  tor_assert(chan->magic == TLS_CHAN_MAGIC);
+  if(chan->type != CHANNEL_TYPE_IMUX)
+    tor_assert(chan->magic == TLS_CHAN_MAGIC);
 
   return (channel_tls_t *)(chan);
 }

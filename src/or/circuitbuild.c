@@ -150,7 +150,7 @@ get_unique_circ_id_by_chan(channel_t *chan)
       test_circ_id = 1;
       chan->next_circ_id = 2;
     }
-    
+
     if (++attempts > MAX_CIRCID_ATTEMPTS) {
       /* Make sure we don't loop forever because all circuit IDs are used.
        *
@@ -271,7 +271,7 @@ circuit_list_path_impl(origin_circuit_t *circ, int verbose, int verbose_names)
 
   if (verbose) {
     const char *nickname = build_state_get_exit_nickname(circ->build_state);
-    smartlist_add_asprintf(elements, "%s%s circ (length %d%s%s):",
+    smartlist_add_asprintf(elements, "0x%p   %s%s circ (length %d%s%s):", circ,
                  circ->build_state->is_internal ? "internal" : "exit",
                  circ->build_state->need_uptime ? " (high-uptime)" : "",
                  circ->build_state->desired_path_len,
@@ -489,6 +489,7 @@ circuit_establish_circuit(uint8_t purpose, extend_info_t *exit_ei, int flags)
 
   if (onion_pick_cpath_exit(circ, exit_ei, is_hs_v3_rp_circuit) < 0 ||
       onion_populate_cpath(circ) < 0) {
+log_notice(LD_OR, "failed to pick cpath or populate it");
     circuit_mark_for_close(TO_CIRCUIT(circ), END_CIRC_REASON_NOPATH);
     return NULL;
   }
@@ -496,6 +497,7 @@ circuit_establish_circuit(uint8_t purpose, extend_info_t *exit_ei, int flags)
   control_event_circuit_status(circ, CIRC_EVENT_LAUNCHED, 0);
 
   if ((err_reason = circuit_handle_first_hop(circ)) < 0) {
+log_notice(LD_OR, "failed to handle first hop");
     circuit_mark_for_close(TO_CIRCUIT(circ), -err_reason);
     return NULL;
   }
@@ -620,7 +622,7 @@ circuit_n_chan_done(channel_t *chan, int status, int close_origin_circuits)
 
   tor_assert(chan);
 
-  log_debug(LD_CIRC,"chan to %s, status=%d",
+  log_notice(LD_CIRC,"chan to %s, status=%d",
             channel_get_canonical_remote_descr(chan), status);
 
   pending_circs = smartlist_new();
@@ -646,7 +648,7 @@ circuit_n_chan_done(channel_t *chan, int status, int close_origin_circuits)
           continue;
       }
       if (!status) { /* chan failed; close circ */
-        log_info(LD_CIRC,"Channel failed; closing circ.");
+        log_notice(LD_CIRC,"Channel failed; closing circ.");
         circuit_mark_for_close(circ, END_CIRC_REASON_CHANNEL_CLOSED);
         continue;
       }
@@ -667,7 +669,7 @@ circuit_n_chan_done(channel_t *chan, int status, int close_origin_circuits)
       if (CIRCUIT_IS_ORIGIN(circ)) {
         if ((err_reason =
              circuit_send_next_onion_skin(TO_ORIGIN_CIRCUIT(circ))) < 0) {
-          log_info(LD_CIRC,
+          log_notice(LD_CIRC,
                    "send_next_onion_skin failed; circuit marked for closing.");
           circuit_mark_for_close(circ, -err_reason);
           continue;
@@ -730,6 +732,10 @@ circuit_deliver_create_cell(circuit_t *circ, const create_cell_t *create_cell,
   log_debug(LD_CIRC,"Chosen circID %u.", (unsigned)id);
   circuit_set_n_circid_chan(circ, id, circ->n_chan);
   cell.circ_id = circ->n_circ_id;
+
+//log_notice(LD_GENERAL, "SENDING CIRCUIT ID 0x%X", cell.circ_id);
+log_notice(LD_GENERAL, "SENDING CIRCUIT ID 0x%X (chan->wide_circ_ids is %d, chan->circ_id_type is %s)",
+ cell.circ_id, circ->n_chan->wide_circ_ids, circ->n_chan->circ_id_type == CIRC_ID_TYPE_HIGHER ? "HIGH" : "LOW");
 
   append_cell_to_circuit_queue(circ, circ->n_chan, &cell,
                                CELL_DIRECTION_OUT, 0);
@@ -927,10 +933,13 @@ circuit_purpose_may_omit_guard(int purpose)
 int
 circuit_send_next_onion_skin(origin_circuit_t *circ)
 {
+log_notice(LD_GENERAL, "circuit_send_next_onion_skin STARTED");
+log_notice(LD_GENERAL, "%s", circuit_list_path_impl(circ, 1, 1));
   tor_assert(circ);
 
   if (circ->cpath->state == CPATH_STATE_CLOSED) {
     /* Case one: we're on the first hop. */
+log_notice(LD_GENERAL, "circuit_send_next_onion_skin FIRST HOP");
     return circuit_send_first_onion_skin(circ);
   }
 
@@ -941,10 +950,11 @@ circuit_send_next_onion_skin(origin_circuit_t *circ)
   circuit_build_times_handle_completed_hop(circ);
 
   if (hop) {
+log_notice(LD_GENERAL, "circuit_send_next_onion_skin MORE HOPS");
     /* Case two: we're on a hop after the first. */
     return circuit_send_intermediate_onion_skin(circ, hop);
   }
-
+log_notice(LD_GENERAL, "circuit_send_next_onion_skin DONE!");
   /* Case three: the circuit is finished. Do housekeeping tasks on it. */
   return circuit_build_no_more_hops(circ);
 }
@@ -1105,7 +1115,7 @@ circuit_send_intermediate_onion_skin(origin_circuit_t *circ,
   extend_cell_t ec;
   memset(&ec, 0, sizeof(ec));
 
-  log_debug(LD_CIRC,"starting to send subsequent skin.");
+  log_notice(LD_CIRC,"starting to send subsequent skin. (port %d, prev port %d)", hop->extend_info->port, hop->prev->extend_info->port);
 
   if (tor_addr_family(&hop->extend_info->addr) != AF_INET) {
     log_warn(LD_BUG, "Trying to extend to a non-IPv4 address.");
@@ -1135,7 +1145,7 @@ circuit_send_intermediate_onion_skin(origin_circuit_t *circ,
   }
   ec.create_cell.handshake_len = len;
 
-  log_info(LD_CIRC,"Sending extend relay cell.");
+  log_notice(LD_CIRC,"Sending extend relay cell.");
   {
     uint8_t command = 0;
     uint16_t payload_len=0;
@@ -1210,18 +1220,18 @@ circuit_extend(cell_t *cell, circuit_t *circ)
   int should_launch = 0;
 
   if (circ->n_chan) {
-    log_fn(LOG_PROTOCOL_WARN, LD_PROTOCOL,
+    log_notice(LD_PROTOCOL,
            "n_chan already set. Bug/attack. Closing.");
     return -1;
   }
   if (circ->n_hop) {
-    log_fn(LOG_PROTOCOL_WARN, LD_PROTOCOL,
+    log_notice(LD_PROTOCOL,
            "conn to next hop already launched. Bug/attack. Closing.");
     return -1;
   }
 
   if (!server_mode(get_options())) {
-    log_fn(LOG_PROTOCOL_WARN, LD_PROTOCOL,
+    log_notice(LD_PROTOCOL,
            "Got an extend cell, but running as a client. Closing.");
     return -1;
   }
@@ -1231,20 +1241,20 @@ circuit_extend(cell_t *cell, circuit_t *circ)
   if (extend_cell_parse(&ec, rh.command,
                         cell->payload+RELAY_HEADER_SIZE,
                         rh.length) < 0) {
-    log_fn(LOG_PROTOCOL_WARN, LD_PROTOCOL,
+    log_notice(LD_PROTOCOL,
            "Can't parse extend cell. Closing circuit.");
     return -1;
   }
 
   if (!ec.orport_ipv4.port || tor_addr_is_null(&ec.orport_ipv4.addr)) {
-    log_fn(LOG_PROTOCOL_WARN, LD_PROTOCOL,
+    log_notice(LD_PROTOCOL,
            "Client asked me to extend to zero destination port or addr.");
     return -1;
   }
 
   if (tor_addr_is_internal(&ec.orport_ipv4.addr, 0) &&
       !get_options()->ExtendAllowPrivateAddresses) {
-    log_fn(LOG_PROTOCOL_WARN, LD_PROTOCOL,
+    log_notice(LD_PROTOCOL,
            "Client asked me to extend to a private address");
     return -1;
   }
@@ -1256,7 +1266,7 @@ circuit_extend(cell_t *cell, circuit_t *circ)
    * and b) because it lets an attacker force the relay to hold open a
    * new TLS connection for each extend request. */
   if (tor_digest_is_zero((const char*)ec.node_id)) {
-    log_fn(LOG_PROTOCOL_WARN, LD_PROTOCOL,
+    log_notice(LD_PROTOCOL,
            "Client asked me to extend without specifying an id_digest.");
     return -1;
   }
@@ -1279,7 +1289,7 @@ circuit_extend(cell_t *cell, circuit_t *circ)
   if (tor_memeq(ec.node_id,
                 TO_OR_CIRCUIT(circ)->p_chan->identity_digest,
                 DIGEST_LEN)) {
-    log_fn(LOG_PROTOCOL_WARN, LD_PROTOCOL,
+    log_notice(LD_PROTOCOL,
            "Client asked me to extend back to the previous hop.");
     return -1;
   }
@@ -1288,8 +1298,8 @@ circuit_extend(cell_t *cell, circuit_t *circ)
   if (! ed25519_public_key_is_zero(&ec.ed_pubkey) &&
       ed25519_pubkey_eq(&ec.ed_pubkey,
                         &TO_OR_CIRCUIT(circ)->p_chan->ed25519_identity)) {
-    log_fn(LOG_PROTOCOL_WARN, LD_PROTOCOL,
-           "Client asked me to extend back to the previous hop "
+    log_notice(LD_PROTOCOL,
+           "2 Client asked me to extend back to the previous hop "
            "(by Ed25519 ID).");
   }
 
@@ -1308,7 +1318,7 @@ circuit_extend(cell_t *cell, circuit_t *circ)
   }
 
   if (!n_chan) {
-    log_debug(LD_CIRC|LD_OR,"Next router (%s): %s",
+    log_notice(LD_CIRC|LD_OR,"Next router (%s): %s",
               fmt_addrport(&ec.orport_ipv4.addr,ec.orport_ipv4.port),
               msg?msg:"????");
 
@@ -1332,11 +1342,11 @@ circuit_extend(cell_t *cell, circuit_t *circ)
                                            (const char*)ec.node_id,
                                            &ec.ed_pubkey);
       if (!n_chan) {
-        log_info(LD_CIRC,"Launching n_chan failed. Closing circuit.");
+        log_notice(LD_CIRC,"Launching n_chan failed. Closing circuit.");
         circuit_mark_for_close(circ, END_CIRC_REASON_CONNECTFAILED);
         return 0;
       }
-      log_debug(LD_CIRC,"connecting in progress (or finished). Good.");
+      log_notice(LD_CIRC,"(extend_circuit) connecting in progress (or finished). Good.");
     }
     /* return success. The onion/circuit/etc will be taken care of
      * automatically (may already have been) whenever n_chan reaches
@@ -1348,12 +1358,14 @@ circuit_extend(cell_t *cell, circuit_t *circ)
   tor_assert(!circ->n_hop); /* Connection is already established. */
   circ->n_chan = n_chan;
   channel_add_circuit(n_chan, circ, circ->n_circ_id);
-  log_debug(LD_CIRC,
+  log_notice(LD_CIRC,
             "n_chan is %s",
             channel_get_canonical_remote_descr(n_chan));
 
-  if (circuit_deliver_create_cell(circ, &ec.create_cell, 1) < 0)
+  if (circuit_deliver_create_cell(circ, &ec.create_cell, 1) < 0) {
+log_notice(LD_CIRC, "Failed to deliver create cell");
     return -1;
+}
 
   return 0;
 }
@@ -1466,6 +1478,7 @@ circuit_truncated(origin_circuit_t *circ, crypt_path_t *layer, int reason)
    *     means that a connection broke or an extend failed. For now,
    *     just give up.
    */
+log_notice(LD_OR, "truncated??");
   circuit_mark_for_close(TO_CIRCUIT(circ),
           END_CIRC_REASON_FLAG_REMOTE|reason);
   return 0;
@@ -2433,6 +2446,7 @@ count_acceptable_nodes, (smartlist_t *nodes))
   int num=0;
 
   SMARTLIST_FOREACH_BEGIN(nodes, const node_t *, node) {
+log_notice(LD_OR,"node %d/%d/%d/%d",node->is_running,node->is_valid,node_has_any_descriptor(node),node_has_curve25519_onion_key(node));
     //    log_debug(LD_CIRC,
 //              "Contemplating whether router %d (%s) is a new option.",
 //              i, r->nickname);

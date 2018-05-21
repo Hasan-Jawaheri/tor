@@ -2017,6 +2017,8 @@ circuit_mark_for_close_, (circuit_t *circ, int reason, int line,
   tor_assert(line);
   tor_assert(file);
 
+log_notice(LD_BUG, "CIRCUIT MARKED FOR CLOOOOSE!");
+
   if (circ->marked_for_close) {
     log_warn(LD_BUG,
         "Duplicate call to circuit_mark_for_close at %s:%d"
