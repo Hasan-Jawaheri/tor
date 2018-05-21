@@ -1984,6 +1984,9 @@ channel_connection_closing(channel_t *chan, or_connection_t *conn)
 {
     tor_assert(chan);
     tor_assert(conn);
+    
+    if (CHANNEL_CONDEMNED(chan))
+      return;
 
     channel_remove_connection(chan, conn);
 
