@@ -941,7 +941,7 @@ channel_dual_handle_state_change_on_orconn(channel_t *chan, or_connection_t *con
     }
 
     if(chan->state != CHANNEL_STATE_OPEN) {
-        channel_change_state(chan, CHANNEL_STATE_OPEN);
+        channel_change_state_open(chan);
     }
 
   }

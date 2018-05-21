@@ -157,12 +157,11 @@ channel_imux_num_cells_writeable_method(channel_t *chan)
   tor_assert(imuxchan->connections);
 
   SMARTLIST_FOREACH_BEGIN(imuxchan->connections, channel_imux_connection_t *, c)
-     {
+  {
 	  cell_network_size += get_cell_network_size(c->conn->wide_circ_ids);
-
-	  outbuf_len+= connection_get_outbuf_len(TO_CONN(c->conn));
-     }
-     SMARTLIST_FOREACH_END(c);
+	  outbuf_len += connection_get_outbuf_len(TO_CONN(c->conn));
+  }
+  SMARTLIST_FOREACH_END(c);
   /* Get the number of cells */
   n = CEIL_DIV(OR_CONN_HIGHWATER - outbuf_len, cell_network_size);
   if (n < 0) n = 0;
@@ -1521,7 +1520,7 @@ channel_imux_handle_state_change_on_orconn(channel_t *chan, or_connection_t *con
     /* if this is the first conneciton to open, mark channel open as well */
     if(chan->state != CHANNEL_STATE_OPEN) {
           imuxchan->controlconn = conn;
-          channel_change_state(chan, CHANNEL_STATE_OPEN);
+          channel_change_state_open(chan);
 
           imuxchan->is_canonical = conn->is_canonical;
           imuxchan->link_proto = conn->link_proto;
@@ -1536,8 +1535,6 @@ channel_imux_handle_state_change_on_orconn(channel_t *chan, or_connection_t *con
 
     log_info(LD_CHANNEL, "channel %p: (close) has %d open connections [%p]", imuxchan, imuxchan->num_open_connections, conn);
   }
-
-
 }
 
 static int
