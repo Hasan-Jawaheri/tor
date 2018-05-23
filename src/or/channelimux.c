@@ -33,6 +33,7 @@
 #include "relay.h"
 #include "router.h"
 #include "routerlist.h"
+#include "scheduler.h"
 
 #define EWMA_TICK 10
 #define EWMA_HALFLIFE 66.0
@@ -1521,9 +1522,13 @@ channel_imux_handle_state_change_on_orconn(channel_t *chan, or_connection_t *con
     if(chan->state != CHANNEL_STATE_OPEN) {
           imuxchan->controlconn = conn;
           channel_change_state_open(chan);
-
           imuxchan->is_canonical = conn->is_canonical;
           imuxchan->link_proto = conn->link_proto;
+          
+          /* We might have just become writeable; check and tell the scheduler */
+          if (connection_or_num_cells_writeable(conn) > 0) {
+            scheduler_channel_wants_writes(chan);
+          }
         }
   }
 
@@ -1661,10 +1666,8 @@ channel_imux_handle_cell(cell_t *cell, or_connection_t *conn)
   }
 
   if(!cell->sequence) {
-
-	     channel_tls_handle_cell(cell, conn);
-	     return;
-
+    channel_tls_handle_cell(cell, conn);
+    return;
   }
 //log_info(LD_CHANNEL,"Lamiaa: cell->sequence = %d  &  imuxcirc->next_sequence = %d",cell->sequence,imuxcirc->next_sequence);
   /* if cell is next in order, process it and flush queue; otherwise buffer it */

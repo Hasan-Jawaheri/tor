@@ -1863,6 +1863,7 @@ channel_handle_cell(cell_t *cell, or_connection_t *conn)
 
   switch(get_options()->ChannelType) {
       case CHANNEL_TYPE_TLS:
+      case CHANNEL_TYPE_PCTCP:
           channel_tls_handle_cell(cell, conn);
           break;
 
@@ -1874,7 +1875,6 @@ channel_handle_cell(cell_t *cell, or_connection_t *conn)
           channel_imux_handle_cell(cell, conn);
           break;
 
-      case CHANNEL_TYPE_PCTCP:
       default:
           log_info(LD_CHANNEL, "can't handle cell -- channel type %d isn't implemented", chan->type);
   }
@@ -1917,6 +1917,7 @@ channel_handle_var_cell(var_cell_t *var_cell, or_connection_t *conn)
 
   switch(get_options()->ChannelType) {
       case CHANNEL_TYPE_TLS:
+      case CHANNEL_TYPE_PCTCP:
           channel_tls_handle_var_cell(var_cell, conn);
           break;
 
@@ -1927,7 +1928,6 @@ channel_handle_var_cell(var_cell_t *var_cell, or_connection_t *conn)
       case CHANNEL_TYPE_IMUX:
           channel_imux_handle_var_cell(var_cell, conn);
           break;
-      case CHANNEL_TYPE_PCTCP:
       default:
           log_info(LD_CHANNEL, "can't handle var cell -- channel type %d isn't implemented", chan->type);
   }
@@ -1939,6 +1939,7 @@ channel_add_connection(channel_t *chan, or_connection_t *conn)
 {
     switch(get_options()->ChannelType) {
         case CHANNEL_TYPE_TLS:
+        case CHANNEL_TYPE_PCTCP:
             channel_tls_add_connection(chan, conn);
             break;
 
@@ -1950,7 +1951,6 @@ channel_add_connection(channel_t *chan, or_connection_t *conn)
             channel_imux_add_connection(chan, conn);
             break;
 
-        case CHANNEL_TYPE_PCTCP:
         default:
             log_info(LD_CHANNEL, "can't add connection -- channel type %d not implemented", chan->type);
     }
@@ -1961,6 +1961,7 @@ channel_remove_connection(channel_t *chan, or_connection_t *conn)
 {
     switch(get_options()->ChannelType) {
         case CHANNEL_TYPE_TLS:
+        case CHANNEL_TYPE_PCTCP:
             channel_tls_remove_connection(chan, conn);
             break;
 
@@ -1972,7 +1973,6 @@ channel_remove_connection(channel_t *chan, or_connection_t *conn)
             channel_imux_remove_connection(chan, conn);
             break;
 
-        case CHANNEL_TYPE_PCTCP:
         default:
             log_info(LD_CHANNEL, "can't remove connection -- channel type %d not implemented", chan->type);
     }
@@ -2786,6 +2786,7 @@ channel_start_writing(channel_t *chan)
   switch(get_options()->ChannelType)
   {
     case CHANNEL_TYPE_TLS:
+    case CHANNEL_TYPE_PCTCP:
       channel_tls_start_writing(chan);
       break;
 
@@ -2798,7 +2799,6 @@ channel_start_writing(channel_t *chan)
       break;
 
     case CHANNEL_TYPE_UNKNOWN:
-    case CHANNEL_TYPE_PCTCP:
     default:
       break;
   }
@@ -3633,6 +3633,7 @@ channel_add_circuit(channel_t *chan, circuit_t *circ, circid_t circid)
 
     switch(get_options()->ChannelType) {
         case CHANNEL_TYPE_TLS:
+        case CHANNEL_TYPE_PCTCP:
             break;
 
         case CHANNEL_TYPE_DUAL:
@@ -3644,7 +3645,6 @@ channel_add_circuit(channel_t *chan, circuit_t *circ, circid_t circid)
             break;
 
         case CHANNEL_TYPE_UNKNOWN:
-        case CHANNEL_TYPE_PCTCP:
         default:
             break;
     }
