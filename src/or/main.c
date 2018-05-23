@@ -13,6 +13,7 @@
 #define MAIN_PRIVATE
 #include "or.h"
 #include "addressmap.h"
+#include "autotune.h"
 #include "backtrace.h"
 #include "buffers.h"
 #include "channel.h"
@@ -358,6 +359,11 @@ connection_remove(connection_t *conn)
   tor_assert(conn->conn_array_index >= 0);
   current_index = conn->conn_array_index;
   connection_unregister_events(conn); /* This is redundant, but cheap. */
+
+  if(get_options()->GlobalSchedulerUSec && connection_speaks_cells(conn)) {
+    global_autotune_remove_pending(TO_OR_CONN(conn));
+  }
+
   if (current_index == smartlist_len(connection_array)-1) { /* at the end */
     smartlist_del(connection_array, current_index);
     return 0;
@@ -760,12 +766,26 @@ conn_write_callback(evutil_socket_t fd, short events, void *_conn)
   (void)fd;
   (void)events;
 
-  LOG_FN_CONN(conn, (LOG_DEBUG, LD_NET, "socket %d wants to write.",
-                     (int)conn->s));
+  /* check if the connection is an OR connection */
+  const or_options_t* opts = get_options();
+  if((opts->GlobalSchedulerUSec || opts->AutotuneWriteUSec)
+      && connection_speaks_cells(conn)) {
+    global_autotune_conn_write_callback(TO_OR_CONN(conn));
+  } else {
+    write_to_connection(conn, 0, NULL);
+  }
+}
+
+size_t
+write_to_connection(connection_t *conn, size_t ceiling, int* has_error) {
+
+  LOG_FN_CONN(conn, (LOG_DEBUG, LD_NET, "socket %d wants to write. ceiling is "U64_FORMAT,
+                     (int)conn->s, ((uint64_t)ceiling)));
 
   /* assert_connection_ok(conn, time(NULL)); */
 
-  if (connection_handle_write(conn, 0) < 0) {
+  size_t n_written = 0;
+  if (connection_handle_write(conn, 0, ceiling, &n_written) < 0) {
     if (!conn->marked_for_close) {
       /* this connection is broken. remove it. */
       log_fn(LOG_WARN,LD_BUG,
@@ -782,11 +802,16 @@ conn_write_callback(evutil_socket_t fd, short events, void *_conn)
       connection_close_immediate(conn); /* So we don't try to flush. */
       connection_mark_for_close(conn);
     }
+    if(has_error) {
+      *has_error = 1;
+    }
   }
   assert_connection_ok(conn, time(NULL));
 
   if (smartlist_len(closeable_connection_lst))
     close_closeable_connections();
+
+  return n_written;
 }
 
 /** If the connection at connection_array[i] is marked for close, then:
@@ -1010,27 +1035,14 @@ directory_info_has_arrived(time_t now, int from_cache)
     consider_testing_reachability(1, 1);
 }
 
-/** How long do we wait before killing OR connections with no circuits?
- * In Tor versions up to 0.2.1.25 and 0.2.2.12-alpha, we waited 15 minutes
- * before cancelling these connections, which caused fast relays to accrue
- * many many idle connections. Hopefully 3 minutes is low enough that
- * it kills most idle connections, without being so low that we cause
- * clients to bounce on and off.
- */
-#define IDLE_OR_CONN_TIMEOUT 180
-
 /** Perform regular maintenance tasks for a single connection.  This
  * function gets run once per second per connection by run_scheduled_events.
  */
 static void
 run_connection_housekeeping(int i, time_t now)
 {
-  cell_t cell;
   connection_t *conn = smartlist_get(connection_array, i);
   const or_options_t *options = get_options();
-  or_connection_t *or_conn;
-  int past_keepalive =
-    now >= conn->timestamp_lastwritten + options->KeepalivePeriod;
 
   if (conn->outbuf && !connection_get_outbuf_len(conn) &&
       conn->type == CONN_TYPE_OR)
@@ -1071,65 +1083,12 @@ run_connection_housekeeping(int i, time_t now)
   /* If we haven't written to an OR connection for a while, then either nuke
      the connection or send a keepalive, depending. */
 
-  or_conn = TO_OR_CONN(conn);
+  or_connection_t *or_conn = TO_OR_CONN(conn);
 #ifdef USE_BUFFEREVENTS
   tor_assert(conn->bufev);
 #else
   tor_assert(conn->outbuf);
 #endif
-
-  if (channel_is_bad_for_new_circs(TLS_CHAN_TO_BASE(or_conn->chan)) &&
-      !connection_or_get_num_circuits(or_conn)) {
-    /* It's bad for new circuits, and has no unmarked circuits on it:
-     * mark it now. */
-    log_info(LD_OR,
-             "Expiring non-used OR connection to fd %d (%s:%d) [Too old].",
-             (int)conn->s, conn->address, conn->port);
-    if (conn->state == OR_CONN_STATE_CONNECTING)
-      connection_or_connect_failed(TO_OR_CONN(conn),
-                                   END_OR_CONN_REASON_TIMEOUT,
-                                   "Tor gave up on the connection");
-    connection_or_close_normally(TO_OR_CONN(conn), 1);
-  } else if (!connection_state_is_open(conn)) {
-    if (past_keepalive) {
-      /* We never managed to actually get this connection open and happy. */
-      log_info(LD_OR,"Expiring non-open OR connection to fd %d (%s:%d).",
-               (int)conn->s,conn->address, conn->port);
-      connection_or_close_normally(TO_OR_CONN(conn), 0);
-    }
-  } else if (we_are_hibernating() &&
-             !connection_or_get_num_circuits(or_conn) &&
-             !connection_get_outbuf_len(conn)) {
-    /* We're hibernating, there's no circuits, and nothing to flush.*/
-    log_info(LD_OR,"Expiring non-used OR connection to fd %d (%s:%d) "
-             "[Hibernating or exiting].",
-             (int)conn->s,conn->address, conn->port);
-    connection_or_close_normally(TO_OR_CONN(conn), 1);
-  } else if (!connection_or_get_num_circuits(or_conn) &&
-             now >= or_conn->timestamp_last_added_nonpadding +
-                                         IDLE_OR_CONN_TIMEOUT) {
-    log_info(LD_OR,"Expiring non-used OR connection to fd %d (%s:%d) "
-             "[idle %d].", (int)conn->s,conn->address, conn->port,
-             (int)(now - or_conn->timestamp_last_added_nonpadding));
-    connection_or_close_normally(TO_OR_CONN(conn), 0);
-  } else if (
-      now >= or_conn->timestamp_lastempty + options->KeepalivePeriod*10 &&
-      now >= conn->timestamp_lastwritten + options->KeepalivePeriod*10) {
-    log_fn(LOG_PROTOCOL_WARN,LD_PROTOCOL,
-           "Expiring stuck OR connection to fd %d (%s:%d). (%d bytes to "
-           "flush; %d seconds since last write)",
-           (int)conn->s, conn->address, conn->port,
-           (int)connection_get_outbuf_len(conn),
-           (int)(now-conn->timestamp_lastwritten));
-    connection_or_close_normally(TO_OR_CONN(conn), 0);
-  } else if (past_keepalive && !connection_get_outbuf_len(conn)) {
-    /* send a padding cell */
-    log_fn(LOG_DEBUG,LD_OR,"Sending keepalive to (%s:%d)",
-           conn->address, conn->port);
-    memset(&cell,0,sizeof(cell_t));
-    cell.command = CELL_PADDING;
-    connection_or_write_cell_to_buf(&cell, or_conn);
-  }
 }
 
 /** Honor a NEWNYM request: make future requests unlinkable to past
@@ -1184,6 +1143,7 @@ run_scheduled_events(time_t now)
   static time_t time_to_recheck_bandwidth = 0;
   static time_t time_to_check_for_expired_networkstatus = 0;
   static time_t time_to_write_stats_files = 0;
+  static time_t time_to_write_circuit_stats = 0;
   static time_t time_to_write_bridge_stats = 0;
   static time_t time_to_check_port_forwarding = 0;
   static time_t time_to_launch_reachability_tests = 0;
@@ -1193,7 +1153,6 @@ run_scheduled_events(time_t now)
   const or_options_t *options = get_options();
 
   int is_server = server_mode(options);
-  int i;
   int have_dir_info;
 
   /** 0. See if we've been asked to shut down and our timeout has
@@ -1375,6 +1334,39 @@ run_scheduled_events(time_t now)
     time_to_write_stats_files = next_time_to_write_stats_files;
   }
 
+  if(options->CircuitStatistics) {
+    if(time_to_write_circuit_stats < now) {
+#define CHECK_CIRCUIT_STATS_INTERVAL (60)
+      time_t next_time_to_write_circuit_stats = (time_to_write_circuit_stats > 0 ?
+          time_to_write_circuit_stats : now) + CHECK_CIRCUIT_STATS_INTERVAL;
+
+      int total_circuits = 0;
+      int total_circuits_building = 0;
+      int total_circuits_pending = 0;
+      int total_circuits_waiting = 0;
+      int total_circuits_open = 0;
+
+      circuit_t *circ;
+      TOR_LIST_FOREACH(circ, circuit_get_global_list(), head) {
+
+        total_circuits++;
+
+        switch(circ->state) {
+          case CIRCUIT_STATE_BUILDING: total_circuits_building++; break;
+          case CIRCUIT_STATE_ONIONSKIN_PENDING: total_circuits_pending++; break;
+          case CIRCUIT_STATE_CHAN_WAIT: total_circuits_waiting++; break;
+          case CIRCUIT_STATE_OPEN: total_circuits_open++; break;
+        }
+      }
+
+      log_notice(LD_GENERAL, "circuit stats: %d total %d open %d waiting %d pending %d building",
+          total_circuits, total_circuits_open, total_circuits_waiting, 
+          total_circuits_pending, total_circuits_building);
+
+      time_to_write_circuit_stats = next_time_to_write_circuit_stats;
+    }
+  }
+
   /* 1h. Check whether we should write bridge statistics to disk.
    */
   if (should_record_bridge_info(options)) {
@@ -1518,11 +1510,14 @@ run_scheduled_events(time_t now)
   if (now % 10 == 5)
     circuit_expire_old_circuits_serverside(now);
 
-  /** 5. We do housekeeping for each connection... */
+  /** 5. We do housekeeping for each channel... */
   connection_or_set_bad_connections(NULL, 0);
-  for (i=0;i<smartlist_len(connection_array);i++) {
-    run_connection_housekeeping(i, now);
-  }
+  /*for (i=0;i<smartlist_len(connection_array);i++) {*/
+    /*run_connection_housekeeping(i, now);*/
+  /*}*/
+
+  channel_run_all_housekeeping(now, 1);
+
   if (time_to_shrink_memory < now) {
     SMARTLIST_FOREACH(connection_array, connection_t *, conn, {
         if (conn->outbuf)
@@ -2546,6 +2541,7 @@ tor_free_all(int postfork)
   smartlist_free(connection_array);
   smartlist_free(closeable_connection_lst);
   smartlist_free(active_linked_connection_lst);
+  global_autotune_free();
   periodic_timer_free(second_timer);
 #ifndef USE_BUFFEREVENTS
   periodic_timer_free(refill_timer);

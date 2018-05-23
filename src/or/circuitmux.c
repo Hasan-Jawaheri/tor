@@ -8,6 +8,7 @@
 
 #include "or.h"
 #include "channel.h"
+#include "channeltls.h"
 #include "circuitlist.h"
 #include "circuitmux.h"
 #include "relay.h"
@@ -1490,6 +1491,30 @@ circuitmux_get_first_active_circuit(circuitmux_t *cmux,
   return circ;
 }
 
+#include <float.h>
+or_connection_t *circuitmux_choose_orconn(smartlist_t *orconn_filter) {
+  or_connection_t *chosen = NULL;
+  double chosen_p = DBL_MAX;
+
+  SMARTLIST_FOREACH(orconn_filter, or_connection_t *, orconn, {
+    if(orconn && orconn->chan) {
+      circuitmux_t* next = orconn->chan->cmux;
+      double next_p = DBL_MAX;
+      if (next && next->policy && next->policy->get_next_priority) {
+        next_p = next->policy->get_next_priority(next, next->policy_data);
+      } else {
+        next_p = DBL_MAX;
+      }
+      if(!chosen || next_p < chosen_p) {
+        chosen_p = next_p;
+        chosen = orconn;
+      }
+    }
+  });
+
+  return chosen;
+}
+
 /**
  * Notify the circuitmux that cells have been sent on a circuit; this
  * is called from channel.c.
@@ -1892,7 +1917,7 @@ circuitmux_append_destroy_cell(channel_t *chan,
      * get called, and we can start putting more data onto the buffer then.
      */
     log_debug(LD_GENERAL, "Primed a buffer.");
-    channel_flush_from_first_active_circuit(chan, 1);
+    channel_flush_from_first_active_circuit(chan, NULL, 1);
   }
 }
 

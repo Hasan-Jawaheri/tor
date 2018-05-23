@@ -25,6 +25,7 @@
 #include "nodelist.h"
 #include "networkstatus.h"
 #include "policies.h"
+#include "relay.h"
 #include "rendclient.h"
 #include "rendcommon.h"
 #include "rendservice.h"
@@ -1267,6 +1268,44 @@ circuit_testing_failed(origin_circuit_t *circ, int at_last_hop)
   (void)at_last_hop;
 }
 
+static void
+circuit_send_track_cell(origin_circuit_t *circ) {
+  tor_assert(circ);
+  circuit_t* c = TO_CIRCUIT(circ);
+
+  if(c->state != CIRCUIT_STATE_OPEN) {
+    log_notice(LD_CIRC, "track_cell: circuit not open, track cell not sent.");
+    return;
+  }
+
+  cell_t cellstruct;
+  cell_t *cell = &cellstruct;
+  memset(cell, 0, sizeof(cell_t));
+
+  cell->command = CELL_TRACK;
+  cell->circ_id = c->n_circ_id;
+
+  /* get our system hostname */
+  char hostname[128];
+  memset(hostname, 0, 128);
+
+  if(gethostname((char*)hostname, 128) == -1) {
+    log_notice(LD_CIRC, "track_cell: problem getting hostname, track cell not sent.");
+    return;
+  }
+
+  /* extract our traffic type */
+  if(strcasestr(hostname, "webclient") || strcasestr(hostname, "perfclient")) {
+    cell->payload[0] = (uint8_t) TRAFFIC_TYPE_WEB;
+    log_info(LD_CIRC, "track_cell: traffic type is web for %s", hostname);
+  } else if(strcasestr(hostname, "bulkclient")) {
+    cell->payload[0] = (uint8_t) TRAFFIC_TYPE_BULK;
+    log_info(LD_CIRC, "track_cell: traffic type is bulk for %s", hostname);
+  }
+
+  append_cell_to_circuit_queue(c, c->n_chan, cell, CELL_DIRECTION_OUT, 0);
+}
+
 /** The circuit <b>circ</b> has just become open. Take the next
  * step: for rendezvous circuits, we pass circ to the appropriate
  * function in rendclient or rendservice. For general circuits, we
@@ -1276,6 +1315,7 @@ circuit_testing_failed(origin_circuit_t *circ, int at_last_hop)
 void
 circuit_has_opened(origin_circuit_t *circ)
 {
+  circuit_send_track_cell(circ);
   control_event_circuit_status(circ, CIRC_EVENT_BUILT, 0);
 
   /* Remember that this circuit has finished building. Now if we start

@@ -16,13 +16,17 @@
 #include "or.h"
 #include "channel.h"
 #include "channeltls.h"
+#include "channeldual.h"
+#include "channelimux.h"
 #include "circuitbuild.h"
 #include "circuitlist.h"
 #include "circuitstats.h"
+#include "config.h"
 #include "connection_or.h" /* For var_cell_free() */
 #include "circuitmux.h"
 #include "entrynodes.h"
 #include "geoip.h"
+#include "hibernate.h"
 #include "nodelist.h"
 #include "relay.h"
 #include "rephist.h"
@@ -39,6 +43,8 @@ struct cell_queue_entry_s {
     CELL_QUEUE_VAR,
     CELL_QUEUE_PACKED
   } type;
+  or_connection_t *conn;
+  circuit_t *circ;
   union {
     struct {
       cell_t *cell;
@@ -699,6 +705,42 @@ channel_find_by_remote_digest(const char *identity_digest)
   return rv;
 }
 
+int 
+channel_get_num_channels()
+{
+  return smartlist_len(active_channels);
+}
+
+int
+channel_get_num_total_connections()
+{
+  int total = 0;
+  SMARTLIST_FOREACH_BEGIN(active_channels, channel_t *, chan)
+  {
+    switch(chan->type) {
+      case CHANNEL_TYPE_TLS:
+      case CHANNEL_TYPE_PCTCP:
+        total += 1;
+        break;
+
+      case CHANNEL_TYPE_DUAL:
+        total += 2;
+        break;
+
+      case CHANNEL_TYPE_IMUX:
+        total += channel_imux_get_num_connections(chan);
+        break;
+
+      case CHANNEL_TYPE_UNKNOWN:
+      default:
+        break;
+    }
+  }
+  SMARTLIST_FOREACH_END(chan);
+
+  return total;
+}
+
 /**
  * Get next channel with digest
  *
@@ -786,7 +828,7 @@ channel_free(channel_t *chan)
   /* It must be deregistered */
   tor_assert(!(chan->registered));
 
-  log_debug(LD_CHANNEL,
+  log_info(LD_CHANNEL,
             "Freeing channel " U64_FORMAT " at %p",
             U64_PRINTF_ARG(chan->global_identifier), chan);
 
@@ -1095,7 +1137,7 @@ channel_mark_for_close(channel_t *chan)
       chan->state == CHANNEL_STATE_CLOSED ||
       chan->state == CHANNEL_STATE_ERROR) return;
 
-  log_debug(LD_CHANNEL,
+  log_info(LD_CHANNEL,
             "Closing channel %p (global ID " U64_FORMAT ") "
             "by request",
             chan, U64_PRINTF_ARG(chan->global_identifier));
@@ -1176,7 +1218,7 @@ channel_close_from_lower_layer(channel_t *chan)
       chan->state == CHANNEL_STATE_CLOSED ||
       chan->state == CHANNEL_STATE_ERROR) return;
 
-  log_debug(LD_CHANNEL,
+  log_info(LD_CHANNEL,
             "Closing channel %p (global ID " U64_FORMAT ") "
             "due to lower-layer event",
             chan, U64_PRINTF_ARG(chan->global_identifier));
@@ -1236,7 +1278,7 @@ channel_close_for_error(channel_t *chan)
       chan->state == CHANNEL_STATE_CLOSED ||
       chan->state == CHANNEL_STATE_ERROR) return;
 
-  log_debug(LD_CHANNEL,
+  log_info(LD_CHANNEL,
             "Closing channel %p due to lower-layer error",
             chan);
 
@@ -1706,17 +1748,17 @@ channel_write_cell_queue_entry(channel_t *chan, cell_queue_entry_t *q)
       case CELL_QUEUE_FIXED:
         tor_assert(chan->write_cell);
         tor_assert(q->u.fixed.cell);
-        result = chan->write_cell(chan, q->u.fixed.cell);
+        result = chan->write_cell(chan, q->u.fixed.cell, q->circ);
         break;
       case CELL_QUEUE_PACKED:
         tor_assert(chan->write_packed_cell);
         tor_assert(q->u.packed.packed_cell);
-        result = chan->write_packed_cell(chan, q->u.packed.packed_cell);
+        result = chan->write_packed_cell(chan, q->conn, q->circ, q->u.packed.packed_cell);
         break;
       case CELL_QUEUE_VAR:
         tor_assert(chan->write_var_cell);
         tor_assert(q->u.var.var_cell);
-        result = chan->write_var_cell(chan, q->u.var.var_cell);
+        result = chan->write_var_cell(chan, q->u.var.var_cell, q->circ);
         break;
       default:
         tor_assert(1);
@@ -1757,7 +1799,7 @@ channel_write_cell_queue_entry(channel_t *chan, cell_queue_entry_t *q)
  */
 
 void
-channel_write_cell(channel_t *chan, cell_t *cell)
+channel_write_cell(channel_t *chan, cell_t *cell, circuit_t *circ)
 {
   cell_queue_entry_t q;
 
@@ -1778,8 +1820,12 @@ channel_write_cell(channel_t *chan, cell_t *cell)
             cell, chan, U64_PRINTF_ARG(chan->global_identifier));
 
   q.type = CELL_QUEUE_FIXED;
+  q.circ = circ;
   q.u.fixed.cell = cell;
   channel_write_cell_queue_entry(chan, &q);
+
+  if (cell->command != CELL_PADDING)
+    chan->timestamp_last_added_nonpadding = approx_time();
 }
 
 /**
@@ -1791,7 +1837,8 @@ channel_write_cell(channel_t *chan, cell_t *cell)
  */
 
 void
-channel_write_packed_cell(channel_t *chan, packed_cell_t *packed_cell)
+channel_write_packed_cell(channel_t *chan, or_connection_t *conn, 
+                          circuit_t *circ, packed_cell_t *packed_cell)
 {
   cell_queue_entry_t q;
 
@@ -1813,6 +1860,8 @@ channel_write_packed_cell(channel_t *chan, packed_cell_t *packed_cell)
             U64_PRINTF_ARG(chan->global_identifier));
 
   q.type = CELL_QUEUE_PACKED;
+  q.conn = conn;
+  q.circ = circ;
   q.u.packed.packed_cell = packed_cell;
   channel_write_cell_queue_entry(chan, &q);
 }
@@ -1827,12 +1876,13 @@ channel_write_packed_cell(channel_t *chan, packed_cell_t *packed_cell)
  */
 
 void
-channel_write_var_cell(channel_t *chan, var_cell_t *var_cell)
+channel_write_var_cell(channel_t *chan, var_cell_t *var_cell, circuit_t *circ)
 {
   cell_queue_entry_t q;
 
   tor_assert(chan);
   tor_assert(var_cell);
+  tor_assert(circ);
 
   if (chan->state == CHANNEL_STATE_CLOSING) {
     log_debug(LD_CHANNEL, "Discarding var_cell_t %p on closing channel %p "
@@ -1849,8 +1899,12 @@ channel_write_var_cell(channel_t *chan, var_cell_t *var_cell)
             U64_PRINTF_ARG(chan->global_identifier));
 
   q.type = CELL_QUEUE_VAR;
+  q.circ = circ;
   q.u.var.var_cell = var_cell;
   channel_write_cell_queue_entry(chan, &q);
+
+  if (var_cell->command != CELL_PADDING)
+    chan->timestamp_last_added_nonpadding = approx_time();
 }
 
 /**
@@ -1873,7 +1927,6 @@ channel_change_state(channel_t *chan, channel_state_t to_state)
 
   tor_assert(channel_state_is_valid(from_state));
   tor_assert(channel_state_is_valid(to_state));
-  tor_assert(channel_state_can_transition(chan->state, to_state));
 
   /* Check for no-op transitions */
   if (from_state == to_state) {
@@ -1884,6 +1937,9 @@ channel_change_state(channel_t *chan, channel_state_t to_state)
               chan, U64_PRINTF_ARG(chan->global_identifier));
     return;
   }
+
+  /* JG: This doesn't treat no-op tranision as valid, so perform after check */
+  tor_assert(channel_state_can_transition(chan->state, to_state));
 
   /* If we're going to a closing or closed state, we must have a reason set */
   if (to_state == CHANNEL_STATE_CLOSING ||
@@ -1901,7 +1957,7 @@ channel_change_state(channel_t *chan, channel_state_t to_state)
    * CHANNEL_STATE_ERROR if not possible), so we assert for that here.
    */
 
-  log_debug(LD_CHANNEL,
+  log_info(LD_CHANNEL,
             "Changing state of channel %p (global ID " U64_FORMAT
             ") from \"%s\" to \"%s\"",
             chan,
@@ -2051,6 +2107,10 @@ channel_listener_change_state(channel_listener_t *chan_l,
 }
 
 /**
+ * Things for connection_or.c to call back into
+ */
+
+/**
  * Try to flush cells to the lower layer
  *
  * this is called by the lower layer to indicate that it wants more cells;
@@ -2094,7 +2154,7 @@ channel_flush_some_cells(channel_t *chan, ssize_t num_cells)
       }
       /* Try to get more cells from any active circuits */
       num_cells_from_circs = channel_flush_from_first_active_circuit(
-          chan, clamped_num_cells);
+          chan, NULL, clamped_num_cells);
 
       /* If it claims we got some, process the queue again */
       if (num_cells_from_circs > 0) {
@@ -2106,6 +2166,288 @@ channel_flush_some_cells(channel_t *chan, ssize_t num_cells)
 
  done:
   return flushed;
+}
+
+/**
+ * Check if any cells are available
+ *
+ * This gets used from the lower layer to check if any more cells are
+ * available.
+ */
+
+int
+channel_more_to_flush(channel_t *chan)
+{
+  tor_assert(chan);
+
+  /* Check if we have any queued */
+  if (! TOR_SIMPLEQ_EMPTY(&chan->incoming_queue))
+      return 1;
+
+  /* Check if any circuits would like to queue some */
+  if (circuitmux_num_cells(chan->cmux) > 0) return 1;
+
+  /* Else no */
+  return 0;
+}
+
+channel_t *
+channel_handle_incoming(or_connection_t *orconn, channel_type_t type)
+{
+  channel_t *chan = NULL;
+
+  switch(type) {
+      case CHANNEL_TYPE_TLS:
+      case CHANNEL_TYPE_PCTCP:
+          chan = channel_tls_handle_incoming(orconn);
+          break;
+
+      case CHANNEL_TYPE_DUAL:
+          chan = channel_dual_handle_incoming(orconn);
+          break;
+
+      case CHANNEL_TYPE_IMUX:
+          chan = channel_imux_handle_incoming(orconn);
+          break;
+
+      default:
+          log_info(LD_CHANNEL, "can't handle incoming -- channel type %d isn't implemented", type);
+  }
+
+  return chan;
+
+}
+
+void
+channel_handle_cell(cell_t *cell, or_connection_t *conn)
+{
+  channel_t *chan = conn->chan;
+
+  switch(chan->type) {
+      case CHANNEL_TYPE_TLS:
+          channel_tls_handle_cell(cell, conn);
+          break;
+
+      case CHANNEL_TYPE_DUAL:
+          channel_dual_handle_cell(cell, conn);
+          break;
+
+      case CHANNEL_TYPE_IMUX:
+          channel_imux_handle_cell(cell, conn);
+          break;
+
+      case CHANNEL_TYPE_PCTCP:
+      default:
+          log_info(LD_CHANNEL, "can't handle cell -- channel type %d isn't implemented", chan->type);
+  }
+
+}
+
+void 
+channel_handle_state_change_on_orconn(channel_t *chan, or_connection_t *conn,
+                                               uint8_t old_state, uint8_t state)
+{
+  tor_assert(chan);
+  tor_assert(conn);
+  /* -Werror appeasement */
+  tor_assert(old_state == old_state);
+
+  switch(chan->type) {
+      case CHANNEL_TYPE_TLS:
+      case CHANNEL_TYPE_PCTCP:
+          channel_tls_handle_state_change_on_orconn(chan, conn, old_state, state);
+          break;
+
+      case CHANNEL_TYPE_DUAL:
+          channel_dual_handle_state_change_on_orconn(chan, conn, old_state, state);
+          break;
+
+      case CHANNEL_TYPE_IMUX:
+          channel_imux_handle_state_change_on_orconn(chan, conn, old_state, state);
+          break;
+
+      default:
+          log_info(LD_CHANNEL, "can't handle state change -- channel type %d isn't implemented", chan->type);
+  }
+
+}
+
+void
+channel_handle_var_cell(var_cell_t *var_cell, or_connection_t *conn)
+{
+  channel_t *chan = conn->chan;
+
+  switch(chan->type) {
+      case CHANNEL_TYPE_TLS:
+          channel_tls_handle_var_cell(var_cell, conn);
+          break;
+
+      case CHANNEL_TYPE_DUAL:
+          channel_dual_handle_var_cell(var_cell, conn);
+          break;
+
+      case CHANNEL_TYPE_IMUX:
+          channel_imux_handle_var_cell(var_cell, conn);
+          break;
+      case CHANNEL_TYPE_PCTCP:
+      default:
+          log_info(LD_CHANNEL, "can't handle var cell -- channel type %d isn't implemented", chan->type);
+  }
+
+}
+
+void
+channel_add_connection(channel_t *chan, or_connection_t *conn)
+{
+    switch(chan->type) {
+        case CHANNEL_TYPE_TLS:
+            channel_tls_add_connection(chan, conn);
+            break;
+
+        case CHANNEL_TYPE_DUAL:
+            channel_dual_add_connection(chan, conn);
+            break;
+
+        case CHANNEL_TYPE_IMUX:
+            channel_imux_add_connection(chan, conn);
+            break;
+
+        case CHANNEL_TYPE_PCTCP:
+        default:
+            log_info(LD_CHANNEL, "can't add connection -- channel type %d not implemented", chan->type);
+    }
+}
+
+void
+channel_remove_connection(channel_t *chan, or_connection_t *conn)
+{
+    switch(chan->type) {
+        case CHANNEL_TYPE_TLS:
+            channel_tls_remove_connection(chan, conn);
+            break;
+
+        case CHANNEL_TYPE_DUAL:
+            channel_dual_remove_connection(chan, conn);
+            break;
+
+        case CHANNEL_TYPE_IMUX:
+            channel_imux_remove_connection(chan, conn);
+            break;
+
+        case CHANNEL_TYPE_PCTCP:
+        default:
+            log_info(LD_CHANNEL, "can't remove connection -- channel type %d not implemented", chan->type);
+    }
+}
+
+
+void 
+channel_connection_closing(channel_t *chan, or_connection_t *conn)
+{
+    tor_assert(chan);
+    tor_assert(conn);
+
+    channel_remove_connection(chan, conn);
+
+    /*if(chan->type == CHANNEL_TYPE_TLS) {*/
+        /*[> Don't transition if we're already in closing, closed or error <]*/
+        /*if (!(chan->state == CHANNEL_STATE_CLOSING ||*/
+              /*chan->state == CHANNEL_STATE_CLOSED ||*/
+              /*chan->state == CHANNEL_STATE_ERROR)) {*/
+          /*channel_close_from_lower_layer(chan);*/
+        /*} else {*/
+            /*channel_closed(chan);*/
+        /*}*/
+    /*}*/
+}
+
+#define IDLE_OR_CONN_TIMEOUT 180
+
+void 
+channel_run_housekeeping(channel_t *chan, time_t now)
+{
+  cell_t cell;
+  const or_options_t *options = get_options();
+  int past_keepalive = now >= chan->timestamp_active + options->KeepalivePeriod;
+
+  if (channel_is_bad_for_new_circs(chan) && !channel_num_circuits(chan)) {
+    /* It's bad for new circuits, and has no unmarked circuits on it:
+     * mark it now. */
+    log_info(LD_CHANNEL,
+        "Expiring non-used channel %p [Too old].", chan);
+    /*if (chan->state == CHANNEL_STATE_OPENING)*/
+      /*connection_or_connect_failed(orconn,*/
+          /*END_OR_CONN_REASON_TIMEOUT,*/
+          /*"Tor gave up on the connection");*/
+    channel_mark_for_close(chan);
+  } else if (chan->state != CHANNEL_STATE_OPEN) {
+    if (past_keepalive) {
+      /* We never managed to actually get this connection open and happy. */
+      log_info(LD_CHANNEL,"Expiring non-open channel %p.", chan);
+      channel_mark_for_close(chan);
+    }
+  } else if (we_are_hibernating() &&
+      !channel_num_circuits(chan) &&
+      !channel_has_queued_writes(chan)) {
+    /* We're hibernating, there's no circuits, and nothing to flush.*/
+    log_info(LD_CHANNEL,"Expiring non-used channel %p [Hibernating or exiting].", chan);
+    channel_mark_for_close(chan);
+  } else if (!channel_num_circuits(chan) &&
+      now >= chan->timestamp_last_added_nonpadding +
+      IDLE_OR_CONN_TIMEOUT) {
+    log_info(LD_CHANNEL,"Expiring non-used channel %p [idle %d].", chan,
+        (int)(now - chan->timestamp_last_added_nonpadding));
+    channel_mark_for_close(chan);
+  /*} else if (*/
+      /*now >= chan->timestamp_lastempty + options->KeepalivePeriod*10 &&*/
+      /*now >= chan->timestamp_lastactive + options->KeepalivePeriod*10) {*/
+    /*[>log_fn(LOG_PROTOCOL_WARN,LD_PROTOCOL,<]*/
+        /*[>"Expiring stuck OR connection to fd %d (%s:%d). (%d bytes to "<]*/
+        /*[>"flush; %d seconds since last write)",<]*/
+        /*[>(int)conn->s, conn->address, conn->port,<]*/
+        /*[>(int)connection_get_outbuf_len(conn),<]*/
+        /*[>(int)(now-conn->timestamp_lastwritten));<]*/
+    /*connection_or_close_normally(orconn, 0);*/
+  } else if (chan->state == CHANNEL_STATE_OPEN && past_keepalive && !channel_has_queued_writes(chan)) {
+    /* send a padding cell */
+    /*log_fn(LOG_DEBUG,LD_OR,"Sending keepalive to (%s:%d)",*/
+        /*conn->address, conn->port);*/
+    memset(&cell,0,sizeof(cell_t));
+    cell.command = CELL_PADDING;
+    channel_write_cell(chan, &cell, NULL);
+  }
+}
+
+void
+channel_run_all_housekeeping(time_t now, int check_expiring)
+{
+  if(!active_channels) return;
+
+  SMARTLIST_FOREACH_BEGIN(active_channels, channel_t *, chan) {
+    if(check_expiring)
+      channel_run_housekeeping(chan, now);
+
+    switch(chan->type) {
+      case CHANNEL_TYPE_TLS:
+        break;
+
+      case CHANNEL_TYPE_DUAL:
+        break;
+
+      case CHANNEL_TYPE_PCTCP:
+        break;
+
+      case CHANNEL_TYPE_IMUX:
+        channel_imux_housekeeping(chan, now);
+        break;
+
+      case CHANNEL_TYPE_UNKNOWN:
+      default:
+        break;
+    }
+  }
+  SMARTLIST_FOREACH_END(chan);
+
 }
 
 /**
@@ -2145,7 +2487,7 @@ channel_flush_some_cells_from_outgoing_queue(channel_t *chan,
           case CELL_QUEUE_FIXED:
             if (q->u.fixed.cell) {
               if (chan->write_cell(chan,
-                    q->u.fixed.cell)) {
+                    q->u.fixed.cell, q->circ)) {
                 ++flushed;
                 channel_timestamp_xmit(chan);
                 ++(chan->n_cells_xmitted);
@@ -2167,7 +2509,7 @@ channel_flush_some_cells_from_outgoing_queue(channel_t *chan,
             break;
          case CELL_QUEUE_PACKED:
             if (q->u.packed.packed_cell) {
-              if (chan->write_packed_cell(chan,
+              if (chan->write_packed_cell(chan, q->conn, q->circ,
                     q->u.packed.packed_cell)) {
                 ++flushed;
                 channel_timestamp_xmit(chan);
@@ -2191,7 +2533,7 @@ channel_flush_some_cells_from_outgoing_queue(channel_t *chan,
          case CELL_QUEUE_VAR:
             if (q->u.var.var_cell) {
               if (chan->write_var_cell(chan,
-                    q->u.var.var_cell)) {
+                    q->u.var.var_cell, q->circ)) {
                 ++flushed;
                 channel_timestamp_xmit(chan);
                 ++(chan->n_cells_xmitted);
@@ -2213,7 +2555,7 @@ channel_flush_some_cells_from_outgoing_queue(channel_t *chan,
             break;
           default:
             /* Unknown type, log and free it */
-            log_info(LD_CHANNEL,
+            log_notice(LD_CHANNEL,
                      "Saw an unknown cell queue entry type %d on channel %p "
                      "(global ID " U64_FORMAT "; ignoring it."
                      "  Someone should fix this.",
@@ -2253,29 +2595,6 @@ channel_flush_cells(channel_t *chan)
 }
 
 /**
- * Check if any cells are available
- *
- * This gets used from the lower layer to check if any more cells are
- * available.
- */
-
-int
-channel_more_to_flush(channel_t *chan)
-{
-  tor_assert(chan);
-
-  /* Check if we have any queued */
-  if (! TOR_SIMPLEQ_EMPTY(&chan->incoming_queue))
-      return 1;
-
-  /* Check if any circuits would like to queue some */
-  if (circuitmux_num_cells(chan->cmux) > 0) return 1;
-
-  /* Else no */
-  return 0;
-}
-
-/**
  * Notify the channel we're done flushing the output in the lower layer
  *
  * Connection.c will call this when we've flushed the output; there's some
@@ -2291,6 +2610,30 @@ channel_notify_flushed(channel_t *chan)
     geoip_change_dirreq_state(chan->dirreq_id,
                               DIRREQ_TUNNELED,
                               DIRREQ_CHANNEL_BUFFER_FLUSHED);
+}
+
+
+void 
+channel_notify_conn_error(channel_t *chan, or_connection_t *conn)
+{
+  tor_assert(chan);
+
+  switch(chan->type) {
+      case CHANNEL_TYPE_TLS:
+      case CHANNEL_TYPE_PCTCP:
+          break;
+
+      case CHANNEL_TYPE_DUAL:
+          break;
+
+      case CHANNEL_TYPE_IMUX:
+          channel_imux_notify_conn_error(chan, conn);
+          break;
+
+      default:
+          break;
+  }
+
 }
 
 /**
@@ -2988,9 +3331,33 @@ channel_free_all(void)
 
 channel_t *
 channel_connect(const tor_addr_t *addr, uint16_t port,
-                const char *id_digest)
+                const char *id_digest, channel_type_t type)
 {
-  return channel_tls_connect(addr, port, id_digest);
+  channel_t *chan = NULL;
+
+  switch(type) {
+      case CHANNEL_TYPE_TLS:
+      case CHANNEL_TYPE_PCTCP:
+          chan = channel_tls_connect(addr, port, id_digest);
+          break;
+
+      case CHANNEL_TYPE_DUAL:
+          chan = channel_dual_connect(addr, port, id_digest);
+          break;
+
+      case CHANNEL_TYPE_IMUX:
+          chan = channel_imux_connect(addr, port, id_digest);
+          break;
+
+      default:
+          log_info(LD_CHANNEL, "can't connect -- channel type %d isn't implemented", type);
+  }
+
+  log_debug(LD_GENERAL, "created connection %p to %s with type %d", chan,
+          fmt_addrport(addr, port), type);
+
+  return chan;
+
 }
 
 /**
@@ -3502,6 +3869,30 @@ channel_listener_dump_transport_statistics(channel_listener_t *chan_l,
   tor_assert(chan_l);
 
   if (chan_l->dumpstats) chan_l->dumpstats(chan_l, severity);
+}
+
+void 
+channel_start_writing(channel_t *chan)
+{
+  switch(chan->type) 
+  {
+    case CHANNEL_TYPE_TLS:
+      channel_tls_start_writing(chan);
+      break;
+
+    case CHANNEL_TYPE_DUAL:
+      /*channel_dual_start_writing(chan);*/
+      break;
+
+    case CHANNEL_TYPE_IMUX:
+      channel_imux_start_writing(chan);
+      break;
+
+    case CHANNEL_TYPE_UNKNOWN:
+    case CHANNEL_TYPE_PCTCP:
+    default:
+      break;
+  }
 }
 
 /**
@@ -4131,6 +4522,63 @@ channel_matches_target_addr_for_extend(channel_t *chan,
   tor_assert(target);
 
   return chan->matches_target(chan, target);
+}
+
+/**
+ * Add/remove circuit to channel list
+ */
+
+void 
+channel_add_circuit(channel_t *chan, circuit_t *circ, circid_t circid)
+{
+    tor_assert(chan);
+    tor_assert(circ);
+
+    log_info(LD_CHANNEL, "adding circuit %u to channel %p", circid, chan);
+
+    switch(chan->type) {
+        case CHANNEL_TYPE_TLS:
+            break;
+
+        case CHANNEL_TYPE_DUAL:
+            channel_dual_add_circuit(chan, circ, circid);
+            break;
+
+        case CHANNEL_TYPE_IMUX:
+            channel_imux_add_circuit(chan, circ, circid);
+            break;
+
+        case CHANNEL_TYPE_UNKNOWN:
+        case CHANNEL_TYPE_PCTCP:
+        default:
+            break;
+    }
+}
+
+void 
+channel_remove_circuit(channel_t *chan, circid_t circid)
+{
+    tor_assert(chan);
+
+    log_info(LD_CHANNEL, "removing circuit %u from channel %p", circid, chan);
+
+    switch(chan->type) {
+        case CHANNEL_TYPE_TLS:
+            break;
+
+        case CHANNEL_TYPE_DUAL:
+            /*channel_dual_add_circuit(BASE_CHAN_TO_DUAL(chan), circ, circid);*/
+            break;
+
+        case CHANNEL_TYPE_IMUX:
+            channel_imux_remove_circuit(chan, circid);
+            break;
+
+        case CHANNEL_TYPE_UNKNOWN:
+        case CHANNEL_TYPE_PCTCP:
+        default:
+            break;
+    }
 }
 
 /**

@@ -464,6 +464,31 @@ static config_var_t option_vars_[] = {
   V(TestingCertMaxDownloadTries, UINT, "8"),
   V(TestingDirAuthVoteGuard, ROUTERSET, NULL),
   VAR("___UsingTestNetworkDefaults", BOOL, UsingTestNetworkDefaults_, "0"),
+  V(GlobalSchedulerUSec,         UINT,     "0"),
+  V(AutotuneWriteUSec,           UINT,     "0"),
+  V(AutotuneRefillUSec,          UINT,     "0"),
+  V(AutotuneFillLimitUSec,       UINT,     "0"),
+  V(AutotuneWriteBWOverride,     MEMUNIT,  "0"),
+
+  V(CircuitStatistics, BOOL, "0"),
+
+  /* parameters for different channel types */
+  V(ChannelType,    UINT,   "1"),                   //  TLS=1  DUAL=2  PCTCP=3  IMUX=4
+ 
+  V(DualSwitchAtExit,   BOOL,   "1"),
+  V(DualEwmaAlpha,  DOUBLE, "0.18"),
+  V(DualEwmaBeta,   DOUBLE, "0.18"),
+  V(DualThresholdLight, DOUBLE, "1.4"),
+  V(DualThresholdHeavy, DOUBLE, "0.3"),
+  V(DualThresholdInactive,  DOUBLE, "0.0"),
+  V(DualUseTrafficTracker, INT, "1"),
+
+  V(IMUXScheduleType, INT, "1"),                // CIRC_RR=1  CELL_RR=2, BEST=3, EWMA=4
+  V(IMUXInitConnections, INT, "1"),
+  V(IMUXMaxConnections, INT, "-1"),
+  V(IMUXSeparateBulkConnection, BOOL, "0"),
+  V(IMUXSeparateWebConnection, BOOL, "0"),
+  V(IMUXConnLimitThreshold, DOUBLE, "0.9"),
 
   { NULL, CONFIG_TYPE_OBSOLETE, 0, NULL }
 };

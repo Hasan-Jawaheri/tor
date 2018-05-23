@@ -52,6 +52,7 @@ static void command_process_create_cell(cell_t *cell, channel_t *chan);
 static void command_process_created_cell(cell_t *cell, channel_t *chan);
 static void command_process_relay_cell(cell_t *cell, channel_t *chan);
 static void command_process_destroy_cell(cell_t *cell, channel_t *chan);
+static void command_process_track_cell(cell_t *cell, channel_t *chan);
 
 /** Convert the cell <b>command</b> into a lower-case, human-readable
  * string. */
@@ -179,6 +180,9 @@ command_process_cell(channel_t *chan, cell_t *cell)
       ++stats_n_destroy_cells_processed;
       PROCESS_CELL(destroy, cell, chan);
       break;
+    case CELL_TRACK:
+      PROCESS_CELL(track, cell, chan);
+      break;
     default:
       log_fn(LOG_INFO, LD_PROTOCOL,
              "Cell of unknown or unexpected type (%d) received.  "
@@ -205,6 +209,45 @@ command_process_var_cell(channel_t *chan, var_cell_t *var_cell)
            var_cell->command);
 }
 
+static void
+command_process_track_cell(cell_t *cell, channel_t *chan)
+{
+  tor_assert(cell);
+  tor_assert(cell->command == CELL_TRACK);
+
+  circuit_t *circ = circuit_get_by_circid_channel(cell->circ_id, chan);
+
+  if (!circ) {
+    log_info(LD_OR,
+        "track_cell: (circ %u) unknown circuit (probably got a destroy earlier). "
+        "Dropping.", cell->circ_id);
+    return;
+  }
+
+  circ->traffic_type = (uint8_t) cell->payload[0];
+
+  if(circ->traffic_type == TRAFFIC_TYPE_WEB) {
+    log_info(LD_CIRC, "track_cell: (circ %u) set traffic type web", cell->circ_id);
+  } else if(circ->traffic_type == TRAFFIC_TYPE_BULK) {
+    log_info(LD_CIRC, "track_cell: (circ %u) set traffic type bulk", cell->circ_id);
+  } else {
+    log_info(LD_CIRC, "track_cell: (circ %u) set unknown traffic type %u", cell->circ_id, circ->traffic_type);
+  }
+
+  if(!circ->n_chan) {
+    log_info(LD_OR, "track_cell: (circ %u) no outgoing channel for circ %u (are we the exit?). "
+        "Dropping.", cell->circ_id, circ->n_circ_id);
+    return;
+  }
+
+  log_info(LD_OR, "track_cell: (circ %u) relaying to circ %u for traffic type %u",
+      cell->circ_id, circ->n_circ_id, circ->traffic_type);
+
+  cell->circ_id = circ->n_circ_id;
+  append_cell_to_circuit_queue(circ, circ->n_chan, cell, CELL_DIRECTION_OUT, 0);
+}
+
+
 /** Process a 'create' <b>cell</b> that just arrived from <b>chan</b>. Make a
  * new circuit with the p_circ_id specified in cell. Put the circuit in state
  * onionskin_pending, and pass the onionskin to the cpuworker. Circ will get
@@ -221,7 +264,7 @@ command_process_create_cell(cell_t *cell, channel_t *chan)
   tor_assert(cell);
   tor_assert(chan);
 
-  log_debug(LD_OR,
+  log_info(LD_OR,
             "Got a CREATE cell for circ_id %u on channel " U64_FORMAT
             " (%p)",
             (unsigned)cell->circ_id,
@@ -572,6 +615,8 @@ command_setup_channel(channel_t *chan)
   channel_set_cell_handlers(chan,
                             command_process_cell,
                             command_process_var_cell);
+
+  channel_timestamp_active(chan);
 }
 
 /** Given a listener, install the right handler to process incoming

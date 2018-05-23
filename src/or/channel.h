@@ -34,6 +34,9 @@ struct channel_s {
   /* Magic number for type-checking cast macros */
   uint32_t magic;
 
+  /* type of channel */
+  channel_type_t type;
+
   /* Current channel state */
   channel_state_t state;
 
@@ -60,6 +63,7 @@ struct channel_s {
   /* Timestamps for both cell channels and listeners */
   time_t timestamp_created; /* Channel created */
   time_t timestamp_active; /* Any activity */
+  time_t timestamp_last_added_non_padding; /* last cell added that wasn't a padding cell */
 
   /* Methods implemented by the lower layer */
 
@@ -111,11 +115,11 @@ struct channel_s {
   /* Check if this channel matches a target address when extending */
   int (*matches_target)(channel_t *, const tor_addr_t *);
   /* Write a cell to an open channel */
-  int (*write_cell)(channel_t *, cell_t *);
+  int (*write_cell)(channel_t *, cell_t *, circuit_t *);
    /* Write a packed cell to an open channel */
-  int (*write_packed_cell)(channel_t *, packed_cell_t *);
+  int (*write_packed_cell)(channel_t *, or_connection_t *conn, circuit_t *, packed_cell_t *);
   /* Write a variable-length cell to an open channel */
-  int (*write_var_cell)(channel_t *, var_cell_t *);
+  int (*write_var_cell)(channel_t *, var_cell_t *, circuit_t *);
 
   /*
    * Hash of the public RSA key for the other side's identity key, or
@@ -266,9 +270,10 @@ channel_listener_state_to_string(channel_listener_state_t state);
 /* Abstract channel operations */
 
 void channel_mark_for_close(channel_t *chan);
-void channel_write_cell(channel_t *chan, cell_t *cell);
-void channel_write_packed_cell(channel_t *chan, packed_cell_t *cell);
-void channel_write_var_cell(channel_t *chan, var_cell_t *cell);
+void channel_write_cell(channel_t *chan, cell_t *cell, circuit_t *circ);
+void channel_write_packed_cell(channel_t *chan, or_connection_t *conn, 
+                                circuit_t *circ, packed_cell_t *cell);
+void channel_write_var_cell(channel_t *chan, var_cell_t *cell, circuit_t *circ);
 
 void channel_listener_mark_for_close(channel_listener_t *chan_l);
 
@@ -382,13 +387,15 @@ void channel_queue_var_cell(channel_t *chan, var_cell_t *var_cell);
 void channel_flush_cells(channel_t *chan);
 
 /* Request from lower layer for more cells if available */
-ssize_t channel_flush_some_cells(channel_t *chan, ssize_t num_cells);
+//ssize_t channel_flush_some_cells(channel_t *chan, ssize_t num_cells);
 
 /* Query if data available on this channel */
-int channel_more_to_flush(channel_t *chan);
+//int channel_more_to_flush(channel_t *chan);
 
 /* Notify flushed outgoing for dirreq handling */
 void channel_notify_flushed(channel_t *chan);
+
+void channel_notify_conn_error(channel_t *chan, or_connection_t *conn);
 
 /* Handle stuff we need to do on open like notifying circuits */
 void channel_do_open_actions(channel_t *chan);
@@ -406,7 +413,7 @@ int channel_send_destroy(circid_t circ_id, channel_t *chan,
  */
 
 channel_t * channel_connect(const tor_addr_t *addr, uint16_t port,
-                            const char *id_digest);
+                            const char *id_digest, channel_type_t type);
 
 channel_t * channel_get_for_extend(const char *digest,
                                    const tor_addr_t *target_addr,
@@ -423,6 +430,7 @@ int channel_is_better(time_t now,
 
 channel_t * channel_find_by_global_id(uint64_t global_identifier);
 channel_t * channel_find_by_remote_digest(const char *identity_digest);
+int channel_get_num_channels();
 
 /** For things returned by channel_find_by_remote_digest(), walk the list.
  */
@@ -452,6 +460,8 @@ void channel_mark_client(channel_t *chan);
 int channel_matches_extend_info(channel_t *chan, extend_info_t *extend_info);
 int channel_matches_target_addr_for_extend(channel_t *chan,
                                            const tor_addr_t *target);
+void channel_add_circuit(channel_t *chan, circuit_t *circ, circid_t circid);
+void  channel_remove_circuit(channel_t *chan, circid_t circid);
 unsigned int channel_num_circuits(channel_t *chan);
 void channel_set_circid_type(channel_t *chan, crypto_pk_t *identity_rcvd,
                              int consider_identity);
@@ -462,6 +472,21 @@ void channel_listener_dump_statistics(channel_listener_t *chan_l,
                                       int severity);
 void channel_listener_dump_transport_statistics(channel_listener_t *chan_l,
                                                 int severity);
+void channel_start_writing(channel_t *chan);
+
+/* Things for connection_or.c to call back into */
+ssize_t channel_flush_some_cells(channel_t *chan, ssize_t num_cells);
+int channel_more_to_flush(channel_t *chan);
+channel_t *channel_handle_incoming(or_connection_t *orconn, channel_type_t type);
+void channel_handle_cell(cell_t *cell, or_connection_t *conn);
+void channel_handle_state_change_on_orconn(channel_t *chan, or_connection_t *conn,
+                                               uint8_t old_state, uint8_t state);
+void channel_handle_var_cell(var_cell_t *var_cell, or_connection_t *conn);
+void channel_add_connection(channel_t *chan, or_connection_t *conn);
+void channel_remove_connection(channel_t *chan, or_connection_t *conn);
+void channel_connection_closing(channel_t *chan, or_connection_t *conn);
+void channel_run_all_housekeeping(time_t now, int check_expiring);
+void channel_run_connection_housekeeping(channel_t *chan, or_connection_t *conn, time_t now);
 
 /* Timestamp queries */
 time_t channel_when_created(channel_t *chan);

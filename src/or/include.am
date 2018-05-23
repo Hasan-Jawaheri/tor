@@ -31,9 +31,12 @@ endif
 
 LIBTOR_A_SOURCES = \
 	src/or/addressmap.c				\
+	src/or/autotune.c				\
 	src/or/buffers.c				\
 	src/or/channel.c				\
 	src/or/channeltls.c				\
+	src/or/channeldual.c				\
+	src/or/channelimux.c				\
 	src/or/circpathbias.c				\
 	src/or/circuitbuild.c				\
 	src/or/circuitlist.c				\
@@ -132,9 +135,12 @@ endif
 
 ORHEADERS = \
 	src/or/addressmap.h				\
+	src/or/autotune.h				\
 	src/or/buffers.h				\
 	src/or/channel.h				\
 	src/or/channeltls.h				\
+	src/or/channeldual.h				\
+	src/or/channelimux.h				\
 	src/or/circpathbias.h				\
 	src/or/circuitbuild.h				\
 	src/or/circuitlist.h				\

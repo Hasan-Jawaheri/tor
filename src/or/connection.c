@@ -535,6 +535,11 @@ connection_free_(connection_t *conn)
 
   if (connection_speaks_cells(conn)) {
     or_connection_t *or_conn = TO_OR_CONN(conn);
+
+    if(get_options()->GlobalSchedulerUSec) {
+        global_autotune_remove_pending(or_conn);
+    }
+
     tor_tls_free(or_conn->tls);
     or_conn->tls = NULL;
     or_handshake_state_free(or_conn->handshake_state);
@@ -545,15 +550,15 @@ connection_free_(connection_t *conn)
       log_info(LD_CHANNEL,
                "Freeing orconn at %p, saw channel %p with ID "
                U64_FORMAT " left un-NULLed",
-               or_conn, TLS_CHAN_TO_BASE(or_conn->chan),
+               or_conn, or_conn->chan,
                U64_PRINTF_ARG(
-                 TLS_CHAN_TO_BASE(or_conn->chan)->global_identifier));
-      if (!(TLS_CHAN_TO_BASE(or_conn->chan)->state == CHANNEL_STATE_CLOSED ||
-            TLS_CHAN_TO_BASE(or_conn->chan)->state == CHANNEL_STATE_ERROR)) {
-        channel_close_for_error(TLS_CHAN_TO_BASE(or_conn->chan));
-      }
+                 or_conn->chan->global_identifier));
+      /*if (!(or_conn->chan->state == CHANNEL_STATE_CLOSED ||*/
+            /*or_conn->chan->state == CHANNEL_STATE_ERROR)) {*/
+        /*channel_close_for_error(or_conn->chan);*/
+      /*}*/
 
-      or_conn->chan->conn = NULL;
+      channel_remove_connection(or_conn->chan, or_conn);
       or_conn->chan = NULL;
     }
   }
@@ -3660,7 +3665,8 @@ connection_outbuf_too_full(connection_t *conn)
  * return 0.
  */
 static int
-connection_handle_write_impl(connection_t *conn, int force)
+connection_handle_write_impl(connection_t *conn, int force,
+    size_t ceiling, size_t* n_written_out)
 {
   int e;
   socklen_t len=(socklen_t)sizeof(e);
@@ -3721,6 +3727,20 @@ connection_handle_write_impl(connection_t *conn, int force)
 
   max_to_write = force ? (ssize_t)conn->outbuf_flushlen
     : connection_bucket_write_limit(conn, now);
+  if(force) {
+    max_to_write = (ssize_t)conn->outbuf_flushlen;
+  } else {
+    max_to_write = connection_bucket_write_limit(conn, now);
+    if(ceiling > 0 && (max_to_write > ((ssize_t)ceiling))) {
+      max_to_write = (ssize_t)ceiling;
+    }
+  }
+
+  log_info(LD_NET, "conn write limits conn=%i flushlen="U64_FORMAT" max_to_write="I64_FORMAT" ceiling="U64_FORMAT,
+      (int)conn->s,
+      (long long unsigned int)conn->outbuf_flushlen,
+      (long long int)max_to_write,
+      (long long unsigned int)ceiling);
 
   if (connection_speaks_cells(conn) &&
       conn->state > OR_CONN_STATE_PROXY_HANDSHAKING) {
@@ -3745,7 +3765,14 @@ connection_handle_write_impl(connection_t *conn, int force)
       }
       return 0;
     } else if (conn->state == OR_CONN_STATE_TLS_SERVER_RENEGOTIATING) {
-      return connection_handle_read(conn);
+      int read_retval = connection_handle_read(conn);
+	  /* if we still need to read but are wating for write, adjust */
+	  if(connection_is_writing(conn) && 
+		 conn->state == OR_CONN_STATE_TLS_SERVER_RENEGOTIATING){
+		connection_stop_writing(conn);
+		connection_start_reading(conn);
+	  }
+	  return read_retval;
     }
 
     /* else open, or closing */
@@ -3757,13 +3784,16 @@ connection_handle_write_impl(connection_t *conn, int force)
      * or_conn to check if it needs to geoip_change_dirreq_state() */
     /* XXXX move this to flushed_some or finished_flushing -NM */
     if (buf_datalen(conn->outbuf) == 0 && or_conn->chan)
-      channel_notify_flushed(TLS_CHAN_TO_BASE(or_conn->chan));
+      channel_notify_flushed(or_conn->chan);
 
     switch (result) {
       CASE_TOR_TLS_ERROR_ANY:
       case TOR_TLS_CLOSE:
-        log_info(LD_NET, result != TOR_TLS_CLOSE ?
+        log_notice(LD_NET, result != TOR_TLS_CLOSE ?
                  "tls error. breaking.":"TLS connection closed on flush");
+
+        channel_notify_conn_error(or_conn->chan, or_conn);
+
         /* Don't flush; connection is dead. */
         connection_or_notify_error(or_conn,
                                    END_OR_CONN_REASON_MISC,
@@ -3826,6 +3856,10 @@ connection_handle_write_impl(connection_t *conn, int force)
       return -1;
     }
     n_written = (size_t) result;
+  }
+
+  if(n_written_out) {
+    *n_written_out = n_written;
   }
 
   if (n_written && conn->type == CONN_TYPE_AP) {
@@ -3902,12 +3936,13 @@ connection_handle_write_impl(connection_t *conn, int force)
 
 /* DOCDOC connection_handle_write */
 int
-connection_handle_write(connection_t *conn, int force)
+connection_handle_write(connection_t *conn, int force,
+    size_t ceiling, size_t* n_written)
 {
     int res;
     tor_gettimeofday_cache_clear();
     conn->in_connection_handle_write = 1;
-    res = connection_handle_write_impl(conn, force);
+    res = connection_handle_write_impl(conn, force, ceiling, n_written);
     conn->in_connection_handle_write = 0;
     return res;
 }
@@ -3928,7 +3963,7 @@ connection_flush(connection_t *conn)
       int r = bufferevent_flush(conn->bufev, EV_WRITE, BEV_FLUSH);
       return (r < 0) ? -1 : 0;
   });
-  return connection_handle_write(conn, 1);
+  return connection_handle_write(conn, 1, 0, NULL);
 }
 
 /** Append <b>len</b> bytes of <b>string</b> onto <b>conn</b>'s
@@ -4012,7 +4047,7 @@ connection_write_to_buf_impl_,(const char *string, size_t len,
     conn->outbuf_flushlen += len;
 
     /* Should we try flushing the outbuf now? */
-    if (conn->in_flushed_some) {
+    if (conn->in_flushed_some || get_options()->AutotuneWriteUSec) {
       /* Don't flush the outbuf when the reason we're writing more stuff is
        * _because_ we flushed the outbuf.  That's unfair. */
       return;
@@ -4026,7 +4061,7 @@ connection_write_to_buf_impl_,(const char *string, size_t len,
     } else
       return; /* no need to try flushing */
 
-    if (connection_handle_write(conn, 0) < 0) {
+    if (connection_handle_write(conn, 0, 0, NULL) < 0) {
       if (!conn->marked_for_close) {
         /* this connection is broken. remove it. */
         log_warn(LD_BUG, "unhandled error on write for "
@@ -4617,9 +4652,14 @@ assert_connection_ok(connection_t *conn, time_t now)
   if (conn->outbuf_flushlen > 0) {
     /* With optimistic data, we may have queued data in
      * EXIT_CONN_STATE_RESOLVING while the conn is not yet marked to writing.
+     *
+     * With global circuit scheduling, we may have data in the outbuf while
+     * not writing because we are delaying the write event.
      * */
     tor_assert((conn->type == CONN_TYPE_EXIT &&
                 conn->state == EXIT_CONN_STATE_RESOLVING) ||
+               get_options()->GlobalSchedulerUSec ||
+               (get_options()->ChannelType == CHANNEL_TYPE_IMUX) ||
                connection_is_writing(conn) ||
                conn->write_blocked_on_bw ||
                (CONN_IS_EDGE(conn) &&

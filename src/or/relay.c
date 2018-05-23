@@ -15,6 +15,7 @@
 #include "addressmap.h"
 #include "buffers.h"
 #include "channel.h"
+#include "channeltls.h"
 #include "circpathbias.h"
 #include "circuitbuild.h"
 #include "circuitlist.h"
@@ -234,6 +235,8 @@ circuit_receive_relay_cell(cell_t *cell, circuit_t *circ,
     return 0;
   }
 
+  circid_t old_circ_id = cell->circ_id;
+
   /* not recognized. pass it on. */
   if (cell_direction == CELL_DIRECTION_OUT) {
     cell->circ_id = circ->n_circ_id; /* switch it */
@@ -276,7 +279,8 @@ circuit_receive_relay_cell(cell_t *cell, circuit_t *circ,
       return 0;
     }
     log_fn(LOG_PROTOCOL_WARN, LD_PROTOCOL,
-           "Didn't recognize cell, but circ stops here! Closing circ.");
+           "Didn't recognize cell %d, but circ stops here! Closing circ %u -> %u direction %s.", cell->sequence, old_circ_id, cell->circ_id,
+           (cell_direction == CELL_DIRECTION_OUT ? "OUT" : "IN"));
     return -END_CIRC_REASON_TORPROTOCOL;
   }
 
@@ -1234,8 +1238,8 @@ connection_edge_process_relay_cell(cell_t *cell, circuit_t *circ,
   relay_header_unpack(&rh, cell->payload);
 //  log_fn(LOG_DEBUG,"command %d stream %d", rh.command, rh.stream_id);
   num_seen++;
-  log_debug(domain, "Now seen %d relay cells here (command %d, stream %d).",
-            num_seen, rh.command, rh.stream_id);
+  log_info(domain, "Now seen %d relay cells here (sequence %d, command %d, stream %d, circuit %d).",
+            num_seen, cell->sequence, rh.command, rh.stream_id, cell->circ_id);
 
   if (rh.length > RELAY_PAYLOAD_SIZE) {
     log_fn(LOG_PROTOCOL_WARN, LD_PROTOCOL,
@@ -2344,7 +2348,7 @@ packed_cell_get_command(const packed_cell_t *cell, int wide_circ_ids)
  * <b>chan</b>-&gt;outbuf.  Return the number of cells written.  Advance
  * the active circuit pointer to the next active circuit in the ring. */
 int
-channel_flush_from_first_active_circuit(channel_t *chan, int max)
+channel_flush_from_first_active_circuit(channel_t *chan, or_connection_t *conn, int max)
 {
   circuitmux_t *cmux = NULL;
   int n_flushed = 0;
@@ -2366,7 +2370,8 @@ channel_flush_from_first_active_circuit(channel_t *chan, int max)
       /* this code is duplicated from some of the logic below. Ugly! XXXX */
       tor_assert(destroy_queue->n > 0);
       cell = cell_queue_pop(destroy_queue);
-      channel_write_packed_cell(chan, cell);
+      /*channel_add_circuit(chan, circ, circ->n_circ_id);*/
+      channel_write_packed_cell(chan, conn, circ, cell);
       /* Update the cmux destroy counter */
       circuitmux_notify_xmit_destroy(cmux);
       cell = NULL;
@@ -2435,7 +2440,8 @@ channel_flush_from_first_active_circuit(channel_t *chan, int max)
                                 DIRREQ_CIRC_QUEUE_FLUSHED);
 
     /* Now send the cell */
-    channel_write_packed_cell(chan, cell);
+    /*channel_add_circuit(chan, circ, circ->n_circ_id);*/
+    channel_write_packed_cell(chan, conn, circ, cell);
     cell = NULL;
 
     /*
@@ -2494,9 +2500,12 @@ append_cell_to_circuit_queue(circuit_t *circ, channel_t *chan,
   or_circuit_t *orcirc = NULL;
   cell_queue_t *queue;
   int streams_blocked;
+  int next_seq = 0;
 #if 0
   uint32_t tgt_max_middle_cells, p_len, n_len, tmp, hard_max_middle_cells;
 #endif
+
+  //int relay_cell = (cell->command == CELL_RELAY);
 
   int exitward;
   if (circ->marked_for_close)
@@ -2506,10 +2515,16 @@ append_cell_to_circuit_queue(circuit_t *circ, channel_t *chan,
   if (exitward) {
     queue = &circ->n_chan_cells;
     streams_blocked = circ->streams_blocked_on_n_chan;
+    //if(relay_cell) {
+       next_seq = (++(circ->n_sequence));
+    //}
   } else {
     orcirc = TO_OR_CIRCUIT(circ);
     queue = &orcirc->p_chan_cells;
     streams_blocked = circ->streams_blocked_on_p_chan;
+    //if(relay_cell) {
+       next_seq = (++(circ->p_sequence));
+    //}
   }
 
   /*
@@ -2594,6 +2609,10 @@ append_cell_to_circuit_queue(circuit_t *circ, channel_t *chan,
   }
 #endif
 
+  cell->sequence = next_seq;
+  //log_notice(LD_GENERAL, "appending cell %d to circuit %u", cell->sequence, cell->circ_id);
+
+
   cell_queue_append_packed_copy(circ, queue, exitward, cell,
                                 chan->wide_circ_ids, 1);
 
@@ -2620,13 +2639,15 @@ append_cell_to_circuit_queue(circuit_t *circ, channel_t *chan,
     log_debug(LD_GENERAL, "Made a circuit active.");
   }
 
-  if (!channel_has_queued_writes(chan)) {
+  if(get_options()->GlobalSchedulerUSec) {
+    channel_start_writing(chan);
+  } else if (!channel_has_queued_writes(chan)) {
     /* There is no data at all waiting to be sent on the outbuf.  Add a
      * cell, so that we can notice when it gets flushed, flushed_some can
      * get called, and we can start putting more data onto the buffer then.
      */
     log_debug(LD_GENERAL, "Primed a buffer.");
-    channel_flush_from_first_active_circuit(chan, 1);
+    channel_flush_from_first_active_circuit(chan, NULL, 1);
   }
 }
 

@@ -872,6 +872,16 @@ typedef enum {
 #define CELL_CREATE2 10
 #define CELL_CREATED2 11
 
+#define CELL_BULK_CONN 64
+#define CELL_WEB_CONN 65
+#define CELL_CLOSING_CONN 66
+#define CELL_CLOSING_CHAN 67
+
+#define CELL_LIGHT_CONN 70
+#define CELL_HEAVY_CONN 71
+
+#define CELL_TRACK 100
+
 #define CELL_VPADDING 128
 #define CELL_CERTS 129
 #define CELL_AUTH_CHALLENGE 130
@@ -910,7 +920,7 @@ typedef enum {
 #define CELL_PAYLOAD_SIZE 509
 /** Number of bytes in a cell transmitted over the network, in the longest
  * form */
-#define CELL_MAX_NETWORK_SIZE 514
+#define CELL_MAX_NETWORK_SIZE 518
 
 /** Maximum length of a header on a variable-length cell. */
 #define VAR_CELL_MAX_HEADER_SIZE 7
@@ -1076,9 +1086,18 @@ typedef enum {
   CHANNEL_LISTENER_STATE_LAST
 } channel_listener_state_t;
 
-/* TLS channel stuff */
+typedef enum {
+    CHANNEL_TYPE_UNKNOWN,
+    CHANNEL_TYPE_TLS,
+    CHANNEL_TYPE_DUAL,
+    CHANNEL_TYPE_PCTCP,
+    CHANNEL_TYPE_IMUX,
+} channel_type_t;
 
+/* channel structures */
 typedef struct channel_tls_s channel_tls_t;
+typedef struct channel_dual_s channel_dual_t;
+typedef struct channel_imux_s channel_imux_t;
 
 /* circuitmux_t typedef; struct circuitmux_s is in circuitmux.h */
 
@@ -1090,6 +1109,8 @@ typedef struct cell_t {
   circid_t circ_id; /**< Circuit which received the cell. */
   uint8_t command; /**< Type of the cell: one of CELL_PADDING, CELL_CREATE,
                     * CELL_DESTROY, etc */
+  uint32_t sequence; /**< Sequence number to allow circuits to be split
+                      * across multiple OR connections */
   uint8_t payload[CELL_PAYLOAD_SIZE]; /**< Cell body. */
 } cell_t;
 
@@ -1465,7 +1486,7 @@ typedef struct or_connection_t {
    * recent, we can rate limit it further. */
 
   /* Channel using this connection */
-  channel_tls_t *chan;
+  channel_t *chan;
 
   tor_addr_t real_addr; /**< The actual address that this connection came from
                        * or went to.  The <b>addr</b> field is prone to
@@ -1520,6 +1541,22 @@ typedef struct or_connection_t {
   /** Last emptied write token bucket in msec since midnight; only used if
    * TB_EMPTY events are enabled. */
   uint32_t write_emptied_time;
+
+  int globalSchedulePending;
+  struct {
+    /* most recent and current socket stats information
+     * FIXME these are not freed! */
+    struct socket_stats_t* prevstats;
+    struct socket_stats_t* currstats;
+    //    smartlist_t* expected_acks;
+    //    ssize_t predicted_acks_coming_soon;
+    /* the number of bytes the kernel would be willing to immediately flush if we sent it */
+    size_t kernel_would_flush;
+    /* the number of bytes tor should write to the kernel from this conn */
+    size_t remaining;
+    size_t written_to_kernel;
+    size_t rttmin_nsec;
+  } autotune;
 } or_connection_t;
 
 /** Subtype of connection_t for an "edge connection" -- that is, an entry (ap)
@@ -2815,6 +2852,9 @@ typedef struct circuit_t {
   uint8_t state; /**< Current status of this circuit. */
   uint8_t purpose; /**< Why are we creating this circuit? */
 
+  uint32_t n_sequence; /**< Keep track of sequence number to assign to cells being sent */
+  uint32_t p_sequence;
+
   /** How many relay data cells can we package (read from edge streams)
    * on this circuit before we receive a circuit-level sendme cell asking
    * for more? */
@@ -2882,7 +2922,13 @@ typedef struct circuit_t {
    * circuit's queues; used only if CELL_STATS events are enabled and
    * cleared after being sent to control port. */
   smartlist_t *testing_cell_stats;
+
+  int traffic_type;
 } circuit_t;
+
+#define TRAFFIC_TYPE_UNKNOWN 0
+#define TRAFFIC_TYPE_WEB 1
+#define TRAFFIC_TYPE_BULK 2
 
 /** Largest number of relay_early cells that we can send on a given
  * circuit. */
@@ -4176,6 +4222,17 @@ typedef struct {
   int PathBiasScaleUseThreshold;
   /** @} */
 
+  unsigned int GlobalSchedulerUSec;
+  /* when autotuning, how often we try to write to kernel */
+  unsigned int AutotuneWriteUSec;
+  /* when autotuning, how often we add to our bucket */
+  unsigned int AutotuneRefillUSec;
+  /* when autotuning, our bucket size is how much we can send in this time */
+  unsigned int AutotuneFillLimitUSec;
+  /* if set, use this as the node's bandwidth instead of auto-detecting it
+   * in bytes/sercond */
+  uint64_t AutotuneWriteBWOverride;
+
   int IPv6Exit; /**< Do we support exiting to IPv6 addresses? */
 
   char *TLSECGroup; /**< One of "P256", "P224", or nil for auto */
@@ -4195,6 +4252,38 @@ typedef struct {
 
   /** Should we send the timestamps that pre-023 hidden services want? */
   int Support022HiddenServices;
+
+  /** Whether or not to print out circuit statistics */
+  int CircuitStatistics;
+
+  /** Type of channel to use between ORs -- TLS=1  DUAL=2  PCTCP=3  IMUX=4 */
+  int ChannelType;
+
+  /****
+   * Parameters for the DUAL EWMA channel type
+   ***/
+
+  /* whether or not to only switch at the exit, or every node */
+  int DualSwitchAtExit;
+
+  /* parameters for EWMA algorithm */
+  double DualEwmaAlpha;
+  double DualEwmaBeta;
+
+  /* thresholds for when to switch from light to heavy (or inactive) */
+  double DualThresholdLight;
+  double DualThresholdHeavy;
+  double DualThresholdInactive;
+
+  int DualUseTrafficTracker;
+
+  /* options for IMUX channel scheduling */
+  int IMUXScheduleType;
+  int IMUXInitConnections;
+  int IMUXMaxConnections;
+  int IMUXSeparateBulkConnection;
+  int IMUXSeparateWebConnection;
+  double IMUXConnLimitThreshold;
 } or_options_t;
 
 /** Persistent state for an onion router, as saved to disk. */

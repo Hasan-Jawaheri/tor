@@ -166,6 +166,9 @@ circuit_set_circid_chan_helper(circuit_t *circ, int direction,
   if (chan == NULL)
     return;
 
+  log_info(LD_GENERAL, "switching circuit %u to new channel %p", id, chan);
+  channel_add_circuit(chan, circ, id);
+
   /* now add the new one to the conn-circid map */
   search.circ_id = id;
   search.chan = chan;
@@ -762,6 +765,10 @@ circuit_free(circuit_t *circ)
       other->rend_splice = NULL;
     }
 
+    if(ocirc->p_chan) {
+        channel_remove_circuit(ocirc->p_chan, ocirc->p_circ_id);
+    }
+
     /* remove from map. */
     circuit_set_p_circid_chan(ocirc, 0, NULL);
 
@@ -774,6 +781,11 @@ circuit_free(circuit_t *circ)
   tor_free(circ->n_chan_create_cell);
 
   TOR_LIST_REMOVE(circ, head);
+
+  /* Remove from channel */
+  if(circ->n_chan) {
+     channel_remove_circuit(circ->n_chan, circ->n_circ_id);
+  }
 
   /* Remove from map. */
   circuit_set_n_circid_chan(circ, 0, NULL);
