@@ -2607,7 +2607,7 @@ set_streams_blocked_on_circ(circuit_t *circ, channel_t *chan,
 }
 
 /** Extract the command from a packed cell. */
-static uint8_t
+uint8_t
 packed_cell_get_command(const packed_cell_t *cell, int wide_circ_ids)
 {
   if (wide_circ_ids) {
@@ -2625,6 +2625,17 @@ packed_cell_get_circid(const packed_cell_t *cell, int wide_circ_ids)
     return ntohl(get_uint32(cell->body));
   } else {
     return ntohs(get_uint16(cell->body));
+  }
+}
+
+/** Extract the sequence from a packed cell. */
+uint32_t
+packed_cell_get_sequence(const packed_cell_t *cell, int wide_circ_ids)
+{
+  if (wide_circ_ids) {
+    return ntohl(get_uint32(cell->body+5));
+  } else {
+    return ntohl(get_uint32(cell->body+3));
   }
 }
 

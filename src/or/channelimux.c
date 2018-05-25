@@ -159,7 +159,8 @@ channel_imux_num_cells_writeable_method(channel_t *chan)
 
   SMARTLIST_FOREACH_BEGIN(imuxchan->connections, channel_imux_connection_t *, c)
   {
-	  cell_network_size += get_cell_network_size(c->conn->wide_circ_ids);
+    if (!cell_network_size)
+    cell_network_size = get_cell_network_size(c->conn->wide_circ_ids);
 	  outbuf_len += connection_get_outbuf_len(TO_CONN(c->conn));
   }
   SMARTLIST_FOREACH_END(c);
@@ -1308,23 +1309,6 @@ channel_imux_write_cell_method(channel_t *chan, cell_t *cell, circuit_t *circ)
  * channel_imux_t and a packed_cell_t, transmit the packed_cell_t.
  */
 
-
-static void
-channel_imux_cell_unpack(cell_t *dest, const char *src, int wide_circ_ids)
-{
-  if (wide_circ_ids) {
-    dest->circ_id = ntohl(get_uint32(src));
-    src += 4;
-  } else {
-    dest->circ_id = ntohs(get_uint16(src));
-    src += 2;
-  }
-  dest->sequence = ntohl(get_uint32(src));
-  src += 4;
-  dest->command = get_uint8(src);
-  memcpy(dest->payload, src+1, CELL_PAYLOAD_SIZE);
-}
-
 int
 channel_imux_write_packed_cell_method(channel_t *chan, or_connection_t *conn,
                                      circuit_t *circ, packed_cell_t *packed_cell)
@@ -1333,23 +1317,24 @@ channel_imux_write_packed_cell_method(channel_t *chan, or_connection_t *conn,
   tor_assert(packed_cell);
 
   channel_imux_t *imuxchan = BASE_CHAN_TO_IMUX(chan);
+  circid_t circ_id_in_packed_cell = packed_cell_get_circid(cell, chan->wide_circ_ids);
+  uint8_t command = packed_cell_get_command(cell, chan->wide_circ_ids);
+  int sequence = packed_cell_get_sequence(cell, chan->wide_circ_ids);
 
-  cell_t cell;
-  channel_imux_cell_unpack(&cell, packed_cell->body, chan->wide_circ_ids);
+  log_notice("channel_imux_write_packed_cell_method(chan=0x%p, conn=0x%p, circ=0x%p (circ_id here = %d), <packed cell: command=%d, circ_id=%d>)",
+    chan, conn, circ, circ->circ_id, command, sequence, circ_id_in_packed_cell);
 
-  relay_header_t rh;
-  relay_header_unpack(&rh, cell.payload);
   channel_imux_connection_t *imuxconn = channel_imux_find_connection_by_orconn(imuxchan, conn);
-  channel_imux_circuit_t *imuxcirc = channel_imux_find_circuit(imuxchan, cell.circ_id);
+  channel_imux_circuit_t *imuxcirc = channel_imux_find_circuit(imuxchan, circ_id_in_packed_cell);
   double ewma_val = 0;
 
   if(!imuxcirc)
-    imuxcirc = channel_imux_add_circuit(chan, circ, cell.circ_id);
+    imuxcirc = channel_imux_add_circuit(chan, circ, circ_id_in_packed_cell);
   
   channel_imux_update_circuit_ewma(imuxchan, imuxcirc);
 
   if(imuxchan->schedule_type != CHANNEL_IMUX_SCHEDULE_KIST || !imuxconn || imuxconn->marked_for_close || TO_CONN(imuxconn->conn)->state != OR_CONN_STATE_OPEN) {
-    imuxconn = channel_imux_get_write_connection(imuxchan, imuxcirc, cell.command);
+    imuxconn = channel_imux_get_write_connection(imuxchan, imuxcirc, command);
     if(imuxcirc) {
       imuxcirc->cells_written += 1;
       ewma_val = imuxcirc->ewma.ewma_val;
@@ -1362,14 +1347,14 @@ channel_imux_write_packed_cell_method(channel_t *chan, or_connection_t *conn,
 
     if(!imuxconn) {
         log_warn(LD_CHANNEL, "channel %p: imuxconn is NULL with %d connections (%d open) -- cell %d command %d circuit %u", imuxchan, 
-            smartlist_len(imuxchan->connections), smartlist_len(imuxchan->open_connections), cell.sequence, cell.command, cell.circ_id);
+            smartlist_len(imuxchan->connections), smartlist_len(imuxchan->open_connections), sequence, command, circ_id_in_packed_cell);
 
         return 0;
     }
 
     conn = imuxconn->conn;
     log_info(LD_CHANNEL, "channel %p: write packed cell %d with command %d for circuit %u (ewma %f) on conn %p (%p)", imuxchan,
-        cell.sequence, cell.command, cell.circ_id, ewma_val, conn, imuxconn);
+        sequence, command, circ_id_in_packed_cell, ewma_val, conn, imuxconn);
   } else {
     /* if we are using a separate bulk connection, attempt to use that for bulk traffic circuits */
     if(get_options()->IMUXSeparateBulkConnection && imuxcirc && imuxcirc->circ &&
@@ -1385,7 +1370,7 @@ channel_imux_write_packed_cell_method(channel_t *chan, or_connection_t *conn,
     }
 
     log_info(LD_CHANNEL, "channel %p: write packed cell %d with command %d for circuit %u (ewma %f) on conn %p (%p) (KIST)", imuxchan,
-        cell.sequence, cell.command, cell.circ_id, ewma_val, conn, imuxconn);
+        sequence, command, circ_id_in_packed_cell, ewma_val, conn, imuxconn);
   }
 
   size_t cell_network_size = get_cell_network_size(chan->wide_circ_ids);
