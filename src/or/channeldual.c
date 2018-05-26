@@ -26,6 +26,7 @@
 #include "relay.h"
 #include "router.h"
 #include "routerlist.h"
+#include "scheduler.h"
 
 #define NUMCONNECTIONS 2
 
@@ -63,6 +64,7 @@ typedef struct channel_dual_circuit_t {
 typedef struct channel_dual_conn_entry_t {
     HT_ENTRY(channel_dual_conn_entry_t) node;
     tor_addr_t addr;
+    uint16_t port;
     channel_t *chan;
 } channel_dual_conn_entry_t;
 
@@ -79,13 +81,13 @@ static HT_HEAD(channel_map, channel_dual_conn_entry_t) channel_by_addr =
 static __inline unsigned
 channel_map_entry_hash(const channel_dual_conn_entry_t *a)
 {
-  return ht_improve_hash(tor_addr_hash(&a->addr));
+  return ht_improve_hash(tor_addr_hash(&a->addr) + a->port);
 }
 /** Hashtable helper: compare two channel_map_entry_t values for equality. */
 static __inline int
 channel_map_entry_eq(const channel_dual_conn_entry_t *a, const channel_dual_conn_entry_t *b)
 {
-  return !tor_addr_compare(&a->addr, &b->addr, CMP_EXACT);
+  return !tor_addr_compare(&a->addr, &b->addr, CMP_EXACT) && (a->port == b->port);
 }
 
 HT_PROTOTYPE(channel_map, channel_dual_conn_entry_t, node, channel_map_entry_hash,
@@ -297,10 +299,12 @@ channel_dual_handle_incoming(or_connection_t *orconn)
   tor_assert(!(orconn->chan));
 
   tor_addr_t addr = TO_CONN(orconn)->addr;
+  uint16_t port = TO_CONN(orconn)->port;
 
   channel_dual_conn_entry_t lookup, *ent;
 
   tor_addr_copy(&lookup.addr, &(addr));
+  lookup.port = port;
   ent = HT_FIND(channel_map, &channel_by_addr, &lookup);
 
   if(!ent) {
@@ -330,6 +334,7 @@ channel_dual_free_method(channel_t *chan)
   log_warn(LD_CHANNEL, "freeing dualchan %p at address %s", dualchan, fmt_addr(&(dualchan->addr)));
 
   tor_addr_copy(&lookup.addr, &(dualchan->addr));
+  lookup.port = dualchan->port;
   ent = HT_FIND(channel_map, &channel_by_addr, &lookup);
 
   if(ent) {
@@ -395,6 +400,7 @@ channel_dual_close_method(channel_t *chan)
   channel_dual_conn_entry_t lookup, *ent;
 
   tor_addr_copy(&lookup.addr, &(dualchan->addr));
+  lookup.port = dualchan->port;
   ent = HT_FIND(channel_map, &channel_by_addr, &lookup);
 
   if(ent) {
@@ -942,9 +948,14 @@ channel_dual_handle_state_change_on_orconn(channel_t *chan, or_connection_t *con
 
     if(chan->state != CHANNEL_STATE_OPEN) {
         channel_change_state_open(chan);
+      
+        /* We might have just become writeable; check and tell the scheduler */
+        if (connection_or_num_cells_writeable(conn) > 0) {
+          scheduler_channel_wants_writes(chan);
+        }
     }
-
-  }
+  } else
+    channel_tls_handle_state_change_on_orconn(chan, conn, old_state, state);
 }
 
 static int
