@@ -370,7 +370,7 @@ command_process_create_cell(cell_t *cell, channel_t *chan)
                          END_CIRC_REASON_TORPROTOCOL);
     return;
   }
-  
+
   //IMUX
   if (circuit_id_in_use_on_channel(cell->circ_id, chan)) {
     const node_t *node = node_get_by_id(chan->identity_digest);

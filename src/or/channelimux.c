@@ -1317,12 +1317,23 @@ channel_imux_write_packed_cell_method(channel_t *chan, or_connection_t *conn,
   tor_assert(packed_cell);
 
   channel_imux_t *imuxchan = BASE_CHAN_TO_IMUX(chan);
-  circid_t circ_id_in_packed_cell = packed_cell_get_circid(cell, chan->wide_circ_ids);
-  uint8_t command = packed_cell_get_command(cell, chan->wide_circ_ids);
-  int sequence = packed_cell_get_sequence(cell, chan->wide_circ_ids);
+  circid_t circ_id_in_packed_cell = packed_cell_get_circid(packed_cell, chan->wide_circ_ids);
+  uint8_t command = packed_cell_get_command(packed_cell, chan->wide_circ_ids);
+  int sequence = packed_cell_get_sequence(packed_cell, chan->wide_circ_ids);
 
-  log_notice("channel_imux_write_packed_cell_method(chan=0x%p, conn=0x%p, circ=0x%p (circ_id here = %d), <packed cell: command=%d, circ_id=%d>)",
-    chan, conn, circ, circ->circ_id, command, sequence, circ_id_in_packed_cell);
+  log_notice(LD_OR, "channel_imux_write_packed_cell_method(chan=0x%p, conn=0x%p, circ=0x%p, <packed cell: command=%d, seq=%d, circ_id=%d>)",
+    chan, conn, circ, command, sequence, circ_id_in_packed_cell);
+  log_notice(LD_OR, "packed_cell bytes: %x %x %x %x %x %x %x %x %x ...",
+(uint8_t)packed_cell->body[0],
+(uint8_t)packed_cell->body[1],
+(uint8_t)packed_cell->body[2],
+(uint8_t)packed_cell->body[3],
+(uint8_t)packed_cell->body[4],
+(uint8_t)packed_cell->body[5],
+(uint8_t)packed_cell->body[6],
+(uint8_t)packed_cell->body[7],
+(uint8_t)packed_cell->body[8]
+);
 
   channel_imux_connection_t *imuxconn = channel_imux_find_connection_by_orconn(imuxchan, conn);
   channel_imux_circuit_t *imuxcirc = channel_imux_find_circuit(imuxchan, circ_id_in_packed_cell);
@@ -1475,6 +1486,7 @@ channel_imux_handle_state_change_on_orconn(channel_t *chan, or_connection_t *con
   channel_imux_connection_t *imuxconn = channel_imux_find_imux_connection(chan, conn);
   if(!imuxconn) {
     log_info(LD_CHANNEL, "channel %p: could not find connection %p for state change", imuxchan, conn);
+    channel_tls_handle_state_change_on_orconn(chan, conn, old_state, state);
     return;
   }
 
@@ -1581,17 +1593,6 @@ channel_imux_flush_conn_to_next_open(channel_imux_t *imuxchan, or_connection_t *
 void
 channel_imux_handle_cell(cell_t *cell, or_connection_t *conn)
 {
-
-
-#ifdef KEEP_TIMING_STATS
-#define PROCESS_CELL(tp, cl, cn) STMT_BEGIN {                   \
-    ++num ## tp;                                                \
-    channel_tls_time_process_cell(cl, cn, & tp ## time ,            \
-                             channel_tls_process_ ## tp ## _cell);  \
-    } STMT_END
-#else
-#define PROCESS_CELL(tp, cl, cn, conn) channel_tls_process_ ## tp ## _cell(cl, cn, conn)
-#endif
   channel_t *chan = conn->chan;
   channel_imux_t *imuxchan = BASE_CHAN_TO_IMUX(chan);
   channel_imux_circuit_t *imuxcirc = channel_imux_find_circuit(imuxchan, cell->circ_id);
@@ -1600,8 +1601,8 @@ channel_imux_handle_cell(cell_t *cell, or_connection_t *conn)
     imuxcirc = channel_imux_find_circuit(imuxchan, cell->circ_id);
   }
 
-  log_info(LD_CHANNEL, "channel %p: received cell %d (%d) on circuit %u on conn %p", imuxchan,
-          cell->sequence, cell->command, cell->circ_id, conn);
+  log_info(LD_CHANNEL, "channel %p: received cell %d (%d) on circuit %u on conn %p WITH ADDRESS %s:%d", imuxchan,
+          cell->sequence, cell->command, cell->circ_id, conn, conn->base_.address, conn->base_.port);
 
   channel_imux_connection_t *imuxconn = channel_imux_find_connection_by_orconn(imuxchan, conn);
   if(!imuxconn) {

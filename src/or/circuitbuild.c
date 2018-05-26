@@ -249,6 +249,8 @@ get_unique_circ_id_by_chan(channel_t *chan)
       }
     }
   } while (in_use);
+
+  log_notice(LD_OR, "CIRCID I CHOOOOOSE IS %u", (unsigned int)test_circ_id);
   return test_circ_id;
 }
 
@@ -719,7 +721,7 @@ circuit_deliver_create_cell(circuit_t *circ, const create_cell_t *create_cell,
     log_warn(LD_CIRC,"Couldn't format create cell");
     goto error;
   }
-  log_debug(LD_CIRC,"Chosen circID %u.", (unsigned)id);
+  log_notice(LD_CIRC,"Chosen circID %u.", (unsigned)id);
   circuit_set_n_circid_chan(circ, id, circ->n_chan);
   cell.circ_id = circ->n_circ_id;
 

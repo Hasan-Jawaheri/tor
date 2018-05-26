@@ -429,12 +429,14 @@ cell_pack(packed_cell_t *dst, const cell_t *src, int wide_circ_ids)
     set_uint16(dest, htons(src->circ_id));
     dest += 2;
   }
-  
+
+  set_uint8(dest, src->command);
+  dest += 1;
+
   set_uint32(dest, htonl(src->sequence));
   dest += 4;
 
-  set_uint8(dest, src->command);
-  memcpy(dest+1, src->payload, CELL_PAYLOAD_SIZE);
+  memcpy(dest, src->payload, CELL_PAYLOAD_SIZE);
 }
 
 /** Unpack the network-order buffer <b>src</b> into a host-order
@@ -450,12 +452,14 @@ cell_unpack(cell_t *dest, const char *src, int wide_circ_ids)
     dest->circ_id = ntohs(get_uint16(src));
     src += 2;
   }
-  
-	dest->sequence = ntohl(get_uint32(src));
-  src += 4;
 
   dest->command = get_uint8(src);
-  memcpy(dest->payload, src+1, CELL_PAYLOAD_SIZE);
+  src += 1;
+
+  dest->sequence = ntohl(get_uint32(src));
+  src += 4;
+
+  memcpy(dest->payload, src, CELL_PAYLOAD_SIZE);
 }
 
 /** Write the header of <b>cell</b> into the first VAR_CELL_MAX_HEADER_SIZE
