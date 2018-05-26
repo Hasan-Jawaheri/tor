@@ -51,6 +51,7 @@
 typedef struct channel_imux_conn_entry_t {
     HT_ENTRY(channel_imux_conn_entry_t) node;
     tor_addr_t addr;
+    uint16_t port;
     channel_t *chan;
 } channel_imux_conn_entry_t;
 
@@ -67,13 +68,13 @@ static HT_HEAD(channel_imux_map, channel_imux_conn_entry_t) channel_by_addr =
 static __inline unsigned
 channel_imux_map_entry_hash(const channel_imux_conn_entry_t *a)
 {
-  return ht_improve_hash(tor_addr_hash(&a->addr));
+  return ht_improve_hash(tor_addr_hash(&a->addr) + a->port);
 }
 /** Hashtable helper: compare two channel_imux_map_entry_t values for equality. */
 static __inline int
 channel_imux_map_entry_eq(const channel_imux_conn_entry_t *a, const channel_imux_conn_entry_t *b)
 {
-  return !tor_addr_compare(&a->addr, &b->addr, CMP_EXACT);
+  return !tor_addr_compare(&a->addr, &b->addr, CMP_EXACT) && a->port == b->port;
 }
 
 HT_PROTOTYPE(channel_imux_map, channel_imux_conn_entry_t, node, channel_imux_map_entry_hash,
@@ -267,6 +268,7 @@ channel_imux_connect(const tor_addr_t *addr, uint16_t port,
   channel_imux_conn_entry_t lookup, *ent;
 
   tor_addr_copy(&lookup.addr, addr);
+  lookup.port = port;
   ent = HT_FIND(channel_imux_map, &channel_by_addr, &lookup);
 
   if(!ent) {
@@ -419,6 +421,7 @@ channel_imux_handle_incoming(or_connection_t *orconn)
   channel_imux_conn_entry_t lookup, *ent;
 
   tor_addr_copy(&lookup.addr, &(addr));
+  lookup.port = port;
   ent = HT_FIND(channel_imux_map, &channel_by_addr, &lookup);
 
   if(!ent) {
@@ -537,6 +540,7 @@ channel_imux_close_method(channel_t *chan)
   /* remove channel from incoming list if there */
   channel_imux_conn_entry_t lookup, *ent;
   tor_addr_copy(&lookup.addr, &(imuxchan->addr));
+  lookup.port = imuxchan->port;
   ent = HT_REMOVE(channel_imux_map, &channel_by_addr, &lookup);
   if(ent)
     tor_free(ent);
@@ -1601,8 +1605,8 @@ channel_imux_handle_cell(cell_t *cell, or_connection_t *conn)
     imuxcirc = channel_imux_find_circuit(imuxchan, cell->circ_id);
   }
 
-  log_info(LD_CHANNEL, "channel %p: received cell %d (%d) on circuit %u on conn %p WITH ADDRESS %s:%d", imuxchan,
-          cell->sequence, cell->command, cell->circ_id, conn, conn->base_.address, conn->base_.port);
+  log_info(LD_CHANNEL, "channel %p: received cell %d (%d) on circuit %u on conn %p WITH ADDRESS %s:%d (is_outgoing=%d)", imuxchan,
+          cell->sequence, cell->command, cell->circ_id, conn, conn->base_.address, conn->base_.port, channel_is_outgoing(chan));
 
   channel_imux_connection_t *imuxconn = channel_imux_find_connection_by_orconn(imuxchan, conn);
   if(!imuxconn) {
@@ -1935,6 +1939,7 @@ channel_imux_remove_connection(channel_t *chan, or_connection_t *conn)
     /* remove this from the incoming channel map if there */
     channel_imux_conn_entry_t lookup, *ent;
     tor_addr_copy(&lookup.addr, &(imuxchan->addr));
+    lookup.port = imuxchan->port;
     ent = HT_REMOVE(channel_imux_map, &channel_by_addr, &lookup);
     if(ent) 
       tor_free(ent);
