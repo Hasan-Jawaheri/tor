@@ -547,11 +547,19 @@ circuit_handle_first_hop(origin_circuit_t *circ)
             fmt_addrport(&firsthop->extend_info->addr,
                          firsthop->extend_info->port));
 
-  n_chan = channel_get_for_extend(firsthop->extend_info->identity_digest,
-                                  &firsthop->extend_info->ed_identity,
-                                  &firsthop->extend_info->addr,
-                                  &msg,
-                                  &should_launch);
+  //IMUX
+  channel_type_t channel_type = get_options()->ChannelType;
+
+  if(channel_type != CHANNEL_TYPE_PCTCP) {
+    n_chan = channel_get_for_extend(firsthop->extend_info->identity_digest,
+                                    &firsthop->extend_info->ed_identity,
+                                    &firsthop->extend_info->addr,
+                                    &msg,
+                                    &should_launch);
+  } else {
+      n_chan = NULL;
+      should_launch = 1;
+  }
 
   if (!n_chan) {
     /* not currently connected in a useful way. */
