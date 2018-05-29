@@ -840,20 +840,6 @@ channel_tls_write_packed_cell_method(channel_t *chan, or_connection_t *conn, cir
   uint8_t command = packed_cell_get_command(packed_cell, chan->wide_circ_ids);
   int sequence = packed_cell_get_sequence(packed_cell, chan->wide_circ_ids);
 
-  log_notice(LD_OR, "channel_tls_write_packed_cell_method(chan=0x%p, conn=0x%p, circ=0x%p, <packed cell: command=%d, seq=%d, circ_id=%ul>)",
-    chan, conn, circ, command, sequence, circ_id_in_packed_cell);
-  log_notice(LD_OR, "packed_cell bytes: %x %x %x %x %x %x %x %x %x ...",
-    (uint8_t)packed_cell->body[0],
-    (uint8_t)packed_cell->body[1],
-    (uint8_t)packed_cell->body[2],
-    (uint8_t)packed_cell->body[3],
-    (uint8_t)packed_cell->body[4],
-    (uint8_t)packed_cell->body[5],
-    (uint8_t)packed_cell->body[6],
-    (uint8_t)packed_cell->body[7],
-    (uint8_t)packed_cell->body[8]
-  );
-
   tor_assert(chan);
   channel_tls_t *tlschan = BASE_CHAN_TO_TLS(chan);
   size_t cell_network_size = get_cell_network_size(chan->wide_circ_ids);
