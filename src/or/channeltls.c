@@ -836,9 +836,9 @@ channel_tls_write_packed_cell_method(channel_t *chan, or_connection_t *conn, cir
   (void)circ;
 
 
-  circid_t circ_id_in_packed_cell = packed_cell_get_circid(packed_cell, chan->wide_circ_ids);
-  uint8_t command = packed_cell_get_command(packed_cell, chan->wide_circ_ids);
-  int sequence = packed_cell_get_sequence(packed_cell, chan->wide_circ_ids);
+  // circid_t circ_id_in_packed_cell = packed_cell_get_circid(packed_cell, chan->wide_circ_ids);
+  // uint8_t command = packed_cell_get_command(packed_cell, chan->wide_circ_ids);
+  // int sequence = packed_cell_get_sequence(packed_cell, chan->wide_circ_ids);
 
   tor_assert(chan);
   channel_tls_t *tlschan = BASE_CHAN_TO_TLS(chan);
