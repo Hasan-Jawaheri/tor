@@ -245,7 +245,7 @@ channel_imux_connect(const tor_addr_t *addr, uint16_t port,
 
   /* figure out how many connections to initally create */
   int n_conns = get_n_open_sockets();
-  int total_max_conns = get_options()->ConnLimit_ * get_options()->IMUXConnLimitThreshold;
+  int total_max_conns = (int)((double)get_options()->ConnLimit_ * (double)get_options()->IMUXConnLimitThreshold);
   int num_connections_to_create = get_options()->IMUXInitConnections;
   if(n_conns >= total_max_conns)
     num_connections_to_create = 1;
@@ -660,7 +660,7 @@ channel_imux_get_remote_descr_method(channel_t *chan, int flags)
 {
 #define MAX_DESCR_LEN 32
 
-  char buf[MAX_DESCR_LEN + 1];
+  static char buf[MAX_DESCR_LEN + 1];
   channel_imux_t *imuxchan = BASE_CHAN_TO_IMUX(chan);
   const char *answer = NULL;
   char *addr_str;
@@ -1736,11 +1736,11 @@ static int channel_imux_get_chan_max_connections(channel_imux_t *imuxchan)
   SMARTLIST_FOREACH_END(imuxcirc);
 
   int total_n_conns = get_n_open_sockets();
-  int total_max_conns = (get_options()->ConnLimit_ - 32) * get_options()->IMUXConnLimitThreshold;
+  int total_max_conns = (int)(((double)get_options()->ConnLimit_ - 32.0) * (double)get_options()->IMUXConnLimitThreshold);
 
   int channel_n_conns = smartlist_len(imuxchan->connections);
 //  log_info (LD_BUG,"Lamiaa total_active_circuits =%d & total_max_conns = %d & channel_active_circuits = %d",total_active_circuits,total_max_conns,channel_active_circuits);
-  int channel_max_conns = (double)channel_active_circuits / (double)total_active_circuits * total_max_conns;
+  int channel_max_conns = (int)((double)channel_active_circuits / (double)total_active_circuits * total_max_conns);
   channel_max_conns = MIN(channel_max_conns, channel_n_conns * 2);
   channel_max_conns = MIN(channel_max_conns, channel_n_conns + (total_max_conns - total_n_conns));
   channel_max_conns = MAX(channel_max_conns, get_options()->IMUXInitConnections);

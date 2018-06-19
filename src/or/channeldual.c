@@ -515,7 +515,7 @@ channel_dual_get_remote_descr_method(channel_t *chan, int flags)
 {
 #define MAX_DESCR_LEN 32
 
-  char buf[MAX_DESCR_LEN + 1];
+  static char buf[MAX_DESCR_LEN + 1];
   channel_dual_t *dualchan = BASE_CHAN_TO_DUAL(chan);
   connection_t *conn;
   const char *answer = NULL;
