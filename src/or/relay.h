@@ -83,7 +83,9 @@ void stream_choice_seed_weak_rng(void);
 int relay_crypt(circuit_t *circ, cell_t *cell, cell_direction_t cell_direction,
                 crypt_path_t **layer_hint, char *recognized);
 
+uint8_t packed_cell_get_command(const packed_cell_t *cell, int wide_circ_ids);
 circid_t packed_cell_get_circid(const packed_cell_t *cell, int wide_circ_ids);
+uint32_t packed_cell_get_sequence(const packed_cell_t *cell, int wide_circ_ids);
 
 #ifdef RELAY_PRIVATE
 STATIC int connected_cell_parse(const relay_header_t *rh, const cell_t *cell,

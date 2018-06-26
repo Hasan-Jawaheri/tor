@@ -45,6 +45,7 @@
 #include "hs_client.h"
 #include "hs_circuit.h"
 #include "hs_ident.h"
+#include "relay.h"
 #include "nodelist.h"
 #include "networkstatus.h"
 #include "policies.h"
@@ -318,7 +319,6 @@ circuit_get_best(const entry_connection_t *conn,
 {
   origin_circuit_t *best=NULL;
   struct timeval now;
-  int intro_going_on_but_too_old = 0;
 
   tor_assert(conn);
 
@@ -339,7 +339,6 @@ circuit_get_best(const entry_connection_t *conn,
     if (purpose == CIRCUIT_PURPOSE_C_INTRODUCE_ACK_WAIT &&
         !must_be_open && origin_circ->hs_circ_has_timed_out &&
         !circ->marked_for_close) {
-        intro_going_on_but_too_old = 1;
         continue;
     }
 
@@ -355,10 +354,9 @@ circuit_get_best(const entry_connection_t *conn,
   }
   SMARTLIST_FOREACH_END(circ);
 
-  if (!best && intro_going_on_but_too_old)
-    log_info(LD_REND|LD_CIRC, "There is an intro circuit being created "
-             "right now, but it has already taken quite a while. Starting "
-             "one in parallel.");
+  log_info(LD_REND|LD_CIRC, "There is an intro circuit being created "
+            "right now, but it has already taken quite a while. Starting "
+            "one in parallel. %p", best);
 
   return best;
 }
@@ -1601,6 +1599,61 @@ circuit_testing_opened(origin_circuit_t *circ)
     consider_testing_reachability(1, 0);
 }
 
+static void
+circuit_send_track_cell(origin_circuit_t *circ) {
+
+  tor_assert(circ);
+  circuit_t* c = TO_CIRCUIT(circ);
+//  log_info(LD_BUG,"Lamiaa circuit_state = %d",c->state);
+
+  if(c->state != CIRCUIT_STATE_OPEN) {
+    log_notice(LD_CIRC, "track_cell: circuit not open, track cell not sent.");
+    return;
+  }
+
+  cell_t cellstruct;
+  cell_t *cell = &cellstruct;
+  memset(cell, 0, sizeof(cell_t));
+
+  cell->command = CELL_TRACK;
+  cell->circ_id = c->n_circ_id;
+
+  /* get our system hostname */
+  char hostname[128];
+  memset(hostname, 0, 128);
+
+//  if(gethostname((char*)hostname, 128) == -1) {
+//    log_notice(LD_CIRC, "track_cell: problem getting hostname, track cell not sent.");
+//    return;
+//  }
+  /* extract our traffic type */
+//  if(strcasestr(hostname, "webclient") || strcasestr(hostname, "perfclient")) {
+//    cell->payload[0] = (uint8_t) TRAFFIC_TYPE_WEB;
+//    log_info(LD_CIRC, "track_cell: traffic type is web for %s", hostname);
+//    log_info(LD_BUG,"Lamiaa traffic_type = %s",cell->payload[0]);
+//
+//  } else
+//	  if(strcasestr(hostname, "bulkclient")) {
+//    cell->payload[0] = (uint8_t) TRAFFIC_TYPE_BULK;
+//    log_info(LD_CIRC, "track_cell: traffic type is bulk for %s", hostname);
+//  }
+
+
+  //Lamiaa changed the condition for testing purpose
+  /* extract our traffic type */
+    if(get_options()->IMUXTrafficType == TRAFFIC_TYPE_WEB) {
+      cell->payload[0] = (uint8_t) TRAFFIC_TYPE_WEB;
+//      log_info(LD_CIRC, "track_cell: traffic type is web for %s", hostname);
+//      log_info(LD_BUG,"Lamiaa traffic_type = %s",cell->payload[0]);
+
+    } else if(get_options()->IMUXTrafficType == TRAFFIC_TYPE_BULK) {
+      cell->payload[0] = (uint8_t) TRAFFIC_TYPE_BULK;
+//      log_info(LD_CIRC, "track_cell: traffic type is bulk for %s", hostname);
+    }
+
+  append_cell_to_circuit_queue(c, c->n_chan, cell, CELL_DIRECTION_OUT, 0);
+}
+
 /** A testing circuit has failed to build. Take whatever stats we want. */
 static void
 circuit_testing_failed(origin_circuit_t *circ, int at_last_hop)
@@ -1627,6 +1680,8 @@ circuit_testing_failed(origin_circuit_t *circ, int at_last_hop)
 void
 circuit_has_opened(origin_circuit_t *circ)
 {
+	circuit_send_track_cell(circ);
+
   control_event_circuit_status(circ, CIRC_EVENT_BUILT, 0);
 
   /* Remember that this circuit has finished building. Now if we start

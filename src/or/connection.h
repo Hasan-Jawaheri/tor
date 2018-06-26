@@ -15,6 +15,8 @@
 /* XXXX For buf_datalen in inline function */
 #include "buffers.h"
 
+or_connection_t* get_or_conn_from_chan(const channel_t* const chan);
+
 const char *conn_type_to_string(int type);
 const char *conn_state_to_string(int type, int state);
 int conn_listener_type_supports_af_unix(int type);
@@ -133,7 +135,8 @@ int connection_fetch_from_buf_http(connection_t *conn,
 
 int connection_wants_to_flush(connection_t *conn);
 int connection_outbuf_too_full(connection_t *conn);
-int connection_handle_write(connection_t *conn, int force);
+int connection_handle_write(connection_t *conn, int force,
+	                          size_t ceiling, size_t* n_written);
 int connection_flush(connection_t *conn);
 
 MOCK_DECL(void, connection_write_to_buf_impl_,

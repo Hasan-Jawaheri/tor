@@ -72,6 +72,7 @@ static void command_process_create_cell(cell_t *cell, channel_t *chan);
 static void command_process_created_cell(cell_t *cell, channel_t *chan);
 static void command_process_relay_cell(cell_t *cell, channel_t *chan);
 static void command_process_destroy_cell(cell_t *cell, channel_t *chan);
+static void command_process_track_cell(cell_t *cell, channel_t *chan);
 
 /** Convert the cell <b>command</b> into a lower-case, human-readable
  * string. */
@@ -199,6 +200,9 @@ command_process_cell(channel_t *chan, cell_t *cell)
       ++stats_n_destroy_cells_processed;
       PROCESS_CELL(destroy, cell, chan);
       break;
+    case CELL_TRACK:
+          PROCESS_CELL(track, cell, chan);
+          break;
     default:
       log_fn(LOG_INFO, LD_PROTOCOL,
              "Cell of unknown or unexpected type (%d) received.  "
@@ -224,6 +228,45 @@ command_process_var_cell(channel_t *chan, var_cell_t *var_cell)
            "; dropping it.",
            var_cell->command);
 }
+
+static void
+command_process_track_cell(cell_t *cell, channel_t *chan)
+{
+  tor_assert(cell);
+  tor_assert(cell->command == CELL_TRACK);
+
+  circuit_t *circ = circuit_get_by_circid_channel(cell->circ_id, chan);
+
+  if (!circ) {
+    log_info(LD_OR,
+        "track_cell: (circ %u) unknown circuit (probably got a destroy earlier). "
+        "Dropping.", cell->circ_id);
+    return;
+  }
+
+  circ->traffic_type = (uint8_t) cell->payload[0];
+
+  if(circ->traffic_type == TRAFFIC_TYPE_WEB) {
+    log_info(LD_CIRC, "track_cell: (circ %u) set traffic type web", cell->circ_id);
+  } else if(circ->traffic_type == TRAFFIC_TYPE_BULK) {
+    log_info(LD_CIRC, "track_cell: (circ %u) set traffic type bulk", cell->circ_id);
+  } else {
+    log_info(LD_CIRC, "track_cell: (circ %u) set unknown traffic type %u", cell->circ_id, circ->traffic_type);
+  }
+
+  if(!circ->n_chan) {
+    log_info(LD_OR, "track_cell: (circ %u) no outgoing channel for circ %u (are we the exit?). "
+        "Dropping.", cell->circ_id, circ->n_circ_id);
+    return;
+  }
+
+  log_info(LD_OR, "track_cell: (circ %u) relaying to circ %u for traffic type %u",
+      cell->circ_id, circ->n_circ_id, circ->traffic_type);
+
+  cell->circ_id = circ->n_circ_id;
+  append_cell_to_circuit_queue(circ, circ->n_chan, cell, CELL_DIRECTION_OUT, 0);
+}
+
 
 /** Process a 'create' <b>cell</b> that just arrived from <b>chan</b>. Make a
  * new circuit with the p_circ_id specified in cell. Put the circuit in state
@@ -311,6 +354,24 @@ command_process_create_cell(cell_t *cell, channel_t *chan)
            (unsigned)cell->circ_id);
     channel_send_destroy(cell->circ_id, chan,
                          END_CIRC_REASON_TORPROTOCOL);
+    return;
+  }
+
+  //IMUX
+  if (circuit_id_in_use_on_channel(cell->circ_id, chan)) {
+    const node_t *node = node_get_by_id(chan->identity_digest);
+    log_fn(LOG_PROTOCOL_WARN, LD_PROTOCOL,
+           "Received CREATE cell (circID %u) for known circ. "
+           "Dropping (age %d).",
+           (unsigned)cell->circ_id,
+           (int)(time(NULL) - channel_when_created(chan)));
+    if (node) {
+      char *p = esc_for_log(node_get_platform(node));
+      log_fn(LOG_PROTOCOL_WARN, LD_PROTOCOL,
+             "Details: router %s, platform %s.",
+             node_describe(node), p);
+      tor_free(p);
+    }
     return;
   }
 
@@ -577,22 +638,24 @@ command_process_destroy_cell(cell_t *cell, channel_t *chan)
   reason = (uint8_t)cell->payload[0];
   circ->received_destroy = 1;
 
-  if (!CIRCUIT_IS_ORIGIN(circ) &&
-      chan == TO_OR_CIRCUIT(circ)->p_chan &&
-      cell->circ_id == TO_OR_CIRCUIT(circ)->p_circ_id) {
-    /* the destroy came from behind */
-    circuit_set_p_circid_chan(TO_OR_CIRCUIT(circ), 0, NULL);
-    circuit_mark_for_close(circ, reason|END_CIRC_REASON_FLAG_REMOTE);
-  } else { /* the destroy came from ahead */
-    circuit_set_n_circid_chan(circ, 0, NULL);
-    if (CIRCUIT_IS_ORIGIN(circ)) {
+  if(circ->state == CIRCUIT_STATE_OPEN) {
+    if (!CIRCUIT_IS_ORIGIN(circ) &&
+        chan == TO_OR_CIRCUIT(circ)->p_chan &&
+        cell->circ_id == TO_OR_CIRCUIT(circ)->p_circ_id) {
+      /* the destroy came from behind */
+      circuit_set_p_circid_chan(TO_OR_CIRCUIT(circ), 0, NULL);
       circuit_mark_for_close(circ, reason|END_CIRC_REASON_FLAG_REMOTE);
-    } else {
-      char payload[1];
-      log_debug(LD_OR, "Delivering 'truncated' back.");
-      payload[0] = (char)reason;
-      relay_send_command_from_edge(0, circ, RELAY_COMMAND_TRUNCATED,
-                                   payload, sizeof(payload), NULL);
+    } else { /* the destroy came from ahead */
+      circuit_set_n_circid_chan(circ, 0, NULL);
+      if (CIRCUIT_IS_ORIGIN(circ)) {
+        circuit_mark_for_close(circ, reason|END_CIRC_REASON_FLAG_REMOTE);
+      } else {
+        char payload[1];
+        log_debug(LD_OR, "Delivering 'truncated' back.");
+        payload[0] = (char)reason;
+        relay_send_command_from_edge(0, circ, RELAY_COMMAND_TRUNCATED,
+                                    payload, sizeof(payload), NULL);
+      }
     }
   }
 }
@@ -614,6 +677,7 @@ command_handle_incoming_channel(channel_listener_t *listener, channel_t *chan)
  * cells on it.
  */
 
+void channel_timestamp_active(channel_t *chan);
 void
 command_setup_channel(channel_t *chan)
 {
@@ -622,6 +686,7 @@ command_setup_channel(channel_t *chan)
   channel_set_cell_handlers(chan,
                             command_process_cell,
                             command_process_var_cell);
+  channel_timestamp_active(chan);
 }
 
 /** Given a listener, install the right handler to process incoming

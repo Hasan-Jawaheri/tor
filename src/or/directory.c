@@ -3323,8 +3323,8 @@ connection_dir_reached_eof(dir_connection_t *conn)
 {
   int retval;
   if (conn->base_.state != DIR_CONN_STATE_CLIENT_READING) {
-    log_info(LD_HTTP,"conn reached eof, not reading. [state=%d] Closing.",
-             conn->base_.state);
+    log_info(LD_HTTP,"conn reached eof, not reading. [state=%d] Closing. connection Type = %d",
+             conn->base_.state, conn->base_.type);
     connection_close_immediate(TO_CONN(conn)); /* error: give up on flushing */
     connection_mark_for_close(TO_CONN(conn));
     return -1;

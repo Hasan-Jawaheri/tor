@@ -13,6 +13,8 @@
 #define TOR_CIRCUITLIST_H
 
 #include "testsupport.h"
+TOR_LIST_HEAD(global_circuitlist_s, circuit_t); //IMUX
+
 #include "hs_ident.h"
 
 MOCK_DECL(smartlist_t *, circuit_get_global_list, (void));

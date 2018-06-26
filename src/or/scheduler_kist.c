@@ -116,10 +116,10 @@ channel_outbuf_length(channel_t *chan)
   /* In theory, this can not happen because we can not scheduler a channel
    * without a connection that has its outbuf initialized. Just in case, bug
    * on this so we can understand a bit more why it happened. */
-  if (SCHED_BUG(BASE_CHAN_TO_TLS(chan)->conn == NULL, chan)) {
+  if (SCHED_BUG(get_or_conn_from_chan(chan) == NULL, chan)) {
     return 0;
   }
-  return buf_datalen(TO_CONN(BASE_CHAN_TO_TLS(chan)->conn)->outbuf);
+  return chan->num_bytes_queued ? chan->num_bytes_queued(chan) : 0;
 }
 
 /* Little helper function for HT_FOREACH_FN. */
@@ -192,7 +192,7 @@ update_socket_info_impl, (socket_table_ent_t *ent))
 #ifdef HAVE_KIST_SUPPORT
   int64_t tcp_space, extra_space;
   const tor_socket_t sock =
-    TO_CONN(BASE_CHAN_TO_TLS((channel_t *) ent->chan)->conn)->s;
+    TO_CONN(get_or_conn_from_chan((channel_t *) ent->chan))->s;
   struct tcp_info tcp;
   socklen_t tcp_info_len = sizeof(tcp);
 
@@ -438,7 +438,7 @@ MOCK_IMPL(void, channel_write_to_kernel, (channel_t *chan))
   log_debug(LD_SCHED, "Writing %lu bytes to kernel for chan %" PRIu64,
             (unsigned long)channel_outbuf_length(chan),
             chan->global_identifier);
-  connection_handle_write(TO_CONN(BASE_CHAN_TO_TLS(chan)->conn), 0);
+  connection_handle_write(TO_CONN(get_or_conn_from_chan(chan)), 0, 0, 0);
 }
 
 /* Return true iff the scheduler has work to perform. */

@@ -60,6 +60,7 @@
 #include "networkstatus.h"
 #include "channelpadding_negotiation.h"
 #include "channelpadding.h"
+#include "main.h"
 
 /** How many CELL_PADDING cells have we received, ever? */
 uint64_t stats_n_padding_cells_processed = 0;
@@ -103,11 +104,12 @@ static int channel_tls_matches_target_method(channel_t *chan,
 static int channel_tls_num_cells_writeable_method(channel_t *chan);
 static size_t channel_tls_num_bytes_queued_method(channel_t *chan);
 static int channel_tls_write_cell_method(channel_t *chan,
-                                         cell_t *cell);
-static int channel_tls_write_packed_cell_method(channel_t *chan,
+                                         cell_t *cell,
+                                         circuit_t* circ);
+static int channel_tls_write_packed_cell_method(channel_t *chan,or_connection_t *conn, circuit_t *circ,
                                                 packed_cell_t *packed_cell);
 static int channel_tls_write_var_cell_method(channel_t *chan,
-                                             var_cell_t *var_cell);
+                                             var_cell_t *var_cell, circuit_t *circ);
 
 /* channel_listener_tls_t method declarations */
 
@@ -118,15 +120,15 @@ channel_tls_listener_describe_transport_method(channel_listener_t *chan_l);
 /** Handle incoming cells for the handshake stuff here rather than
  * passing them on up. */
 
+static void channel_tls_process_padding_negotiate_cell(cell_t *cell,
+    channel_t *chan, or_connection_t *conn);
 static void channel_tls_process_versions_cell(var_cell_t *cell,
-                                              channel_tls_t *tlschan);
+		channel_t *chan, or_connection_t *conn);
 static void channel_tls_process_netinfo_cell(cell_t *cell,
-                                             channel_tls_t *tlschan);
+		channel_t *chan, or_connection_t *conn);
 static int command_allowed_before_handshake(uint8_t command);
 static int enter_v3_handshake_with_cell(var_cell_t *cell,
-                                        channel_tls_t *tlschan);
-static void channel_tls_process_padding_negotiate_cell(cell_t *cell,
-                                                       channel_tls_t *chan);
+		channel_t *chan, or_connection_t *conn);
 
 /**
  * Do parts of channel_tls_t initialization common to channel_tls_connect()
@@ -143,6 +145,7 @@ channel_tls_common_init(channel_tls_t *tlschan)
   chan = &(tlschan->base_);
   channel_init(chan);
   chan->magic = TLS_CHAN_MAGIC;
+  chan->type = CHANNEL_TYPE_TLS;
   chan->state = CHANNEL_STATE_OPENING;
   chan->close = channel_tls_close_method;
   chan->describe_transport = channel_tls_describe_transport_method;
@@ -206,7 +209,7 @@ channel_tls_connect(const tor_addr_t *addr, uint16_t port,
   channel_mark_outgoing(chan);
 
   /* Set up or_connection stuff */
-  tlschan->conn = connection_or_connect(addr, port, id_digest, ed_id, tlschan);
+  tlschan->conn = connection_or_connect(addr, port, id_digest, ed_id, chan);
   /* connection_or_connect() will fill in tlschan->conn */
   if (!(tlschan->conn)) {
     chan->reason_for_closing = CHANNEL_CLOSE_FOR_ERROR;
@@ -330,7 +333,7 @@ channel_tls_handle_incoming(or_connection_t *orconn)
 
   /* Link the channel and orconn to each other */
   tlschan->conn = orconn;
-  orconn->chan = tlschan;
+  orconn->chan = chan;
 
   if (is_local_addr(&(TO_CONN(orconn)->addr))) {
     log_debug(LD_CHANNEL,
@@ -368,17 +371,25 @@ channel_tls_to_base(channel_tls_t *tlschan)
   return &(tlschan->base_);
 }
 
+or_connection_t *
+channel_tls_to_orconn(channel_tls_t *tlschan)
+{
+  if (!tlschan) return NULL;
+
+  return tlschan->conn;
+}
+
 /**
  * Cast a channel_t to a channel_tls_t, with appropriate type-checking
  * asserts.
  */
 
 channel_tls_t *
-channel_tls_from_base(channel_t *chan)
+channel_tls_from_base(const channel_t *chan)
 {
   if (!chan) return NULL;
 
-  tor_assert(chan->magic == TLS_CHAN_MAGIC);
+  //tor_assert(chan->magic == TLS_CHAN_MAGIC);
 
   return (channel_tls_t *)(chan);
 }
@@ -806,8 +817,10 @@ channel_tls_num_cells_writeable_method(channel_t *chan)
  */
 
 static int
-channel_tls_write_cell_method(channel_t *chan, cell_t *cell)
+channel_tls_write_cell_method(channel_t *chan, cell_t *cell, circuit_t* circ)
 {
+  (void) circ;
+
   channel_tls_t *tlschan = BASE_CHAN_TO_TLS(chan);
   int written = 0;
 
@@ -835,9 +848,12 @@ channel_tls_write_cell_method(channel_t *chan, cell_t *cell)
  */
 
 static int
-channel_tls_write_packed_cell_method(channel_t *chan,
+channel_tls_write_packed_cell_method(channel_t *chan,or_connection_t *conn, circuit_t *circ,
                                      packed_cell_t *packed_cell)
 {
+  (void) conn;
+  (void) circ;
+
   tor_assert(chan);
   channel_tls_t *tlschan = BASE_CHAN_TO_TLS(chan);
   size_t cell_network_size = get_cell_network_size(chan->wide_circ_ids);
@@ -871,8 +887,10 @@ channel_tls_write_packed_cell_method(channel_t *chan,
  */
 
 static int
-channel_tls_write_var_cell_method(channel_t *chan, var_cell_t *var_cell)
+channel_tls_write_var_cell_method(channel_t *chan, var_cell_t *var_cell, circuit_t *circ)
 {
+  (void) circ;
+  
   channel_tls_t *tlschan = BASE_CHAN_TO_TLS(chan);
   int written = 0;
 
@@ -963,21 +981,18 @@ channel_tls_listener_describe_transport_method(channel_listener_t *chan_l)
  */
 
 void
-channel_tls_handle_state_change_on_orconn(channel_tls_t *chan,
+channel_tls_handle_state_change_on_orconn(channel_t *chan,
                                           or_connection_t *conn,
                                           uint8_t old_state,
                                           uint8_t state)
 {
-  channel_t *base_chan;
+  channel_t *base_chan = chan;
 
   tor_assert(chan);
   tor_assert(conn);
   tor_assert(conn->chan == chan);
-  tor_assert(chan->conn == conn);
   /* Shut the compiler up without triggering -Wtautological-compare */
   (void)old_state;
-
-  base_chan = TLS_CHAN_TO_BASE(chan);
 
   /* Make sure the base connection state makes sense - shouldn't be error
    * or closed. */
@@ -1063,7 +1078,7 @@ channel_tls_time_process_cell(cell_t *cell, channel_tls_t *chan, int *time,
 void
 channel_tls_handle_cell(cell_t *cell, or_connection_t *conn)
 {
-  channel_tls_t *chan;
+  channel_t *chan;
   int handshaking;
 
 #ifdef KEEP_TIMING_STATS
@@ -1073,7 +1088,7 @@ channel_tls_handle_cell(cell_t *cell, or_connection_t *conn)
                              channel_tls_process_ ## tp ## _cell);  \
     } STMT_END
 #else /* !(defined(KEEP_TIMING_STATS)) */
-#define PROCESS_CELL(tp, cl, cn) channel_tls_process_ ## tp ## _cell(cl, cn)
+#define PROCESS_CELL(tp, cl, cn, conn) channel_tls_process_ ## tp ## _cell(cl, cn, conn)
 #endif /* defined(KEEP_TIMING_STATS) */
 
   tor_assert(cell);
@@ -1100,9 +1115,10 @@ channel_tls_handle_cell(cell_t *cell, or_connection_t *conn)
            "Received unexpected cell command %d in chan state %s / "
            "conn state %s; closing the connection.",
            (int)cell->command,
-           channel_state_to_string(TLS_CHAN_TO_BASE(chan)->state),
+           channel_state_to_string(chan->state),
            conn_state_to_string(CONN_TYPE_OR, TO_CONN(conn)->state));
-    connection_or_close_for_error(conn, 0);
+    if((int)conn->chan->type != CHANNEL_TYPE_IMUX)
+      connection_or_close_for_error(conn, 0);
     return;
   }
 
@@ -1114,13 +1130,13 @@ channel_tls_handle_cell(cell_t *cell, or_connection_t *conn)
   entry_guards_note_internet_connectivity(get_guard_selection_info());
   rep_hist_padding_count_read(PADDING_TYPE_TOTAL);
 
-  if (TLS_CHAN_TO_BASE(chan)->currently_padding)
+  if (chan->currently_padding)
     rep_hist_padding_count_read(PADDING_TYPE_ENABLED_TOTAL);
 
   switch (cell->command) {
     case CELL_PADDING:
       rep_hist_padding_count_read(PADDING_TYPE_CELL);
-      if (TLS_CHAN_TO_BASE(chan)->currently_padding)
+      if (chan->currently_padding)
         rep_hist_padding_count_read(PADDING_TYPE_ENABLED_CELL);
       ++stats_n_padding_cells_processed;
       /* do nothing */
@@ -1130,11 +1146,11 @@ channel_tls_handle_cell(cell_t *cell, or_connection_t *conn)
       break;
     case CELL_NETINFO:
       ++stats_n_netinfo_cells_processed;
-      PROCESS_CELL(netinfo, cell, chan);
+      PROCESS_CELL(netinfo, cell, chan, conn);
       break;
     case CELL_PADDING_NEGOTIATE:
       ++stats_n_netinfo_cells_processed;
-      PROCESS_CELL(padding_negotiate, cell, chan);
+      PROCESS_CELL(padding_negotiate, cell, chan, conn);
       break;
     case CELL_CREATE:
     case CELL_CREATE_FAST:
@@ -1149,7 +1165,7 @@ channel_tls_handle_cell(cell_t *cell, or_connection_t *conn)
        * These are all transport independent and we pass them up through the
        * channel_t mechanism.  They are ultimately handled in command.c.
        */
-      channel_queue_cell(TLS_CHAN_TO_BASE(chan), cell);
+      channel_queue_cell(chan, cell);
       break;
     default:
       log_fn(LOG_INFO, LD_PROTOCOL,
@@ -1181,7 +1197,7 @@ channel_tls_handle_cell(cell_t *cell, or_connection_t *conn)
 void
 channel_tls_handle_var_cell(var_cell_t *var_cell, or_connection_t *conn)
 {
-  channel_tls_t *chan;
+  channel_t *chan;
 
 #ifdef KEEP_TIMING_STATS
   /* how many of each cell have we seen so far this second? needs better
@@ -1230,8 +1246,8 @@ channel_tls_handle_var_cell(var_cell_t *var_cell, or_connection_t *conn)
                (int)(var_cell->command),
                conn_state_to_string(CONN_TYPE_OR, TO_CONN(conn)->state),
                TO_CONN(conn)->state,
-               channel_state_to_string(TLS_CHAN_TO_BASE(chan)->state),
-               (int)(TLS_CHAN_TO_BASE(chan)->state));
+               channel_state_to_string(chan->state),
+               (int)(chan->state));
         /*
          * The code in connection_or.c will tell channel_t to close for
          * error; it will go to CHANNEL_STATE_CLOSING, and then to
@@ -1259,13 +1275,13 @@ channel_tls_handle_var_cell(var_cell_t *var_cell, or_connection_t *conn)
                (int)(var_cell->command),
                conn_state_to_string(CONN_TYPE_OR, TO_CONN(conn)->state),
                (int)(TO_CONN(conn)->state),
-               channel_state_to_string(TLS_CHAN_TO_BASE(chan)->state),
-               (int)(TLS_CHAN_TO_BASE(chan)->state));
+               channel_state_to_string(chan->state),
+               (int)(chan->state));
         /* see above comment about CHANNEL_STATE_ERROR */
         connection_or_close_for_error(conn, 0);
         return;
       } else {
-        if (enter_v3_handshake_with_cell(var_cell, chan) < 0)
+        if (enter_v3_handshake_with_cell(var_cell, chan, conn) < 0)
           return;
       }
       break;
@@ -1283,8 +1299,8 @@ channel_tls_handle_var_cell(var_cell_t *var_cell, or_connection_t *conn)
                (int)(var_cell->command),
                conn_state_to_string(CONN_TYPE_OR, TO_CONN(conn)->state),
                (int)(TO_CONN(conn)->state),
-               channel_state_to_string(TLS_CHAN_TO_BASE(chan)->state),
-               (int)(TLS_CHAN_TO_BASE(chan)->state),
+               channel_state_to_string(chan->state),
+               (int)(chan->state),
                (int)(conn->link_proto));
         return;
       }
@@ -1297,8 +1313,8 @@ channel_tls_handle_var_cell(var_cell_t *var_cell, or_connection_t *conn)
              (int)(var_cell->command),
              conn_state_to_string(CONN_TYPE_OR, TO_CONN(conn)->state),
              (int)(TO_CONN(conn)->state),
-             channel_state_to_string(TLS_CHAN_TO_BASE(chan)->state),
-             (int)(TLS_CHAN_TO_BASE(chan)->state));
+             channel_state_to_string(chan->state),
+             (int)(chan->state));
       return;
   }
 
@@ -1311,7 +1327,7 @@ channel_tls_handle_var_cell(var_cell_t *var_cell, or_connection_t *conn)
   switch (var_cell->command) {
     case CELL_VERSIONS:
       ++stats_n_versions_cells_processed;
-      PROCESS_CELL(versions, var_cell, chan);
+      PROCESS_CELL(versions, var_cell, chan, conn);
       break;
     case CELL_VPADDING:
       ++stats_n_vpadding_cells_processed;
@@ -1319,15 +1335,15 @@ channel_tls_handle_var_cell(var_cell_t *var_cell, or_connection_t *conn)
       break;
     case CELL_CERTS:
       ++stats_n_certs_cells_processed;
-      PROCESS_CELL(certs, var_cell, chan);
+      PROCESS_CELL(certs, var_cell, chan, conn);
       break;
     case CELL_AUTH_CHALLENGE:
       ++stats_n_auth_challenge_cells_processed;
-      PROCESS_CELL(auth_challenge, var_cell, chan);
+      PROCESS_CELL(auth_challenge, var_cell, chan, conn);
       break;
     case CELL_AUTHENTICATE:
       ++stats_n_authenticate_cells_processed;
-      PROCESS_CELL(authenticate, var_cell, chan);
+      PROCESS_CELL(authenticate, var_cell, chan, conn);
       break;
     case CELL_AUTHORIZE:
       ++stats_n_authorize_cells_processed;
@@ -1338,6 +1354,58 @@ channel_tls_handle_var_cell(var_cell_t *var_cell, or_connection_t *conn)
              "Variable-length cell of unknown type (%d) received.",
              (int)(var_cell->command));
       break;
+  }
+}
+
+
+void
+channel_tls_add_connection(channel_t *chan, or_connection_t *conn)
+{
+  tor_assert(chan);
+  tor_assert(conn);
+
+  channel_tls_t *tlschan = BASE_CHAN_TO_TLS(chan);
+
+  tlschan->conn = conn;
+}
+
+
+void
+channel_tls_remove_connection(channel_t *chan, or_connection_t *conn)
+{
+  tor_assert(chan);
+  tor_assert(conn);
+
+  if(chan->magic != TLS_CHAN_MAGIC) {
+    log_warn(LD_CHANNEL, "channel %p: magic value incorrect, channel has most likely been freed, skipping", chan);
+    return;
+  }
+
+  channel_tls_t *tlschan = BASE_CHAN_TO_TLS(chan);
+
+  /* Don't transition if we're already in closing, closed or error */
+  if (!(chan->state == CHANNEL_STATE_CLOSING ||
+        chan->state == CHANNEL_STATE_CLOSED ||
+        chan->state == CHANNEL_STATE_ERROR)) {
+      channel_close_from_lower_layer(chan);
+  } else {
+      channel_closed(chan);
+  }
+
+  tlschan->conn = NULL;
+}
+
+
+void
+channel_tls_start_writing(channel_t *chan)
+{
+  tor_assert(chan);
+
+  channel_tls_t *tlschan = BASE_CHAN_TO_TLS(chan);
+
+  if(!connection_is_writing(TO_CONN(tlschan->conn))) {
+    /* autotuning, libevent will tell us to add to pending queue */
+    connection_start_writing(TO_CONN(tlschan->conn));
   }
 }
 
@@ -1355,12 +1423,10 @@ channel_tls_handle_var_cell(var_cell_t *var_cell, or_connection_t *conn)
 void
 channel_tls_update_marks(or_connection_t *conn)
 {
-  channel_t *chan = NULL;
+  channel_t *chan = conn->chan;
 
   tor_assert(conn);
   tor_assert(conn->chan);
-
-  chan = TLS_CHAN_TO_BASE(conn->chan);
 
   if (is_local_addr(&(TO_CONN(conn)->addr))) {
     if (!channel_is_local(chan)) {
@@ -1409,18 +1475,18 @@ command_allowed_before_handshake(uint8_t command)
  */
 
 static int
-enter_v3_handshake_with_cell(var_cell_t *cell, channel_tls_t *chan)
+enter_v3_handshake_with_cell(var_cell_t *cell, channel_t *chan, or_connection_t *conn)
 {
   int started_here = 0;
 
   tor_assert(cell);
   tor_assert(chan);
-  tor_assert(chan->conn);
+  tor_assert(conn);
 
-  started_here = connection_or_nonopen_was_started_here(chan->conn);
+  started_here = connection_or_nonopen_was_started_here(conn);
 
-  tor_assert(TO_CONN(chan->conn)->state == OR_CONN_STATE_TLS_HANDSHAKING ||
-             TO_CONN(chan->conn)->state ==
+  tor_assert(TO_CONN(conn)->state == OR_CONN_STATE_TLS_HANDSHAKING ||
+             TO_CONN(conn)->state ==
                OR_CONN_STATE_TLS_SERVER_RENEGOTIATING);
 
   if (started_here) {
@@ -1428,14 +1494,14 @@ enter_v3_handshake_with_cell(var_cell_t *cell, channel_tls_t *chan)
            "Received a cell while TLS-handshaking, not in "
            "OR_HANDSHAKING_V3, on a connection we originated.");
   }
-  connection_or_block_renegotiation(chan->conn);
-  chan->conn->base_.state = OR_CONN_STATE_OR_HANDSHAKING_V3;
-  if (connection_init_or_handshake_state(chan->conn, started_here) < 0) {
-    connection_or_close_for_error(chan->conn, 0);
+  connection_or_block_renegotiation(conn);
+  conn->base_.state = OR_CONN_STATE_OR_HANDSHAKING_V3;
+  if (connection_init_or_handshake_state(conn, started_here) < 0) {
+    connection_or_close_for_error(conn, 0);
     return -1;
   }
-  or_handshake_state_record_var_cell(chan->conn,
-                                     chan->conn->handshake_state, cell, 1);
+  or_handshake_state_record_var_cell(conn,
+                                     conn->handshake_state, cell, 1);
   return 0;
 }
 
@@ -1450,35 +1516,35 @@ enter_v3_handshake_with_cell(var_cell_t *cell, channel_tls_t *chan)
  */
 
 static void
-channel_tls_process_versions_cell(var_cell_t *cell, channel_tls_t *chan)
+channel_tls_process_versions_cell(var_cell_t *cell, channel_t *chan, or_connection_t *conn)
 {
   int highest_supported_version = 0;
   int started_here = 0;
 
   tor_assert(cell);
   tor_assert(chan);
-  tor_assert(chan->conn);
+  tor_assert(conn);
 
   if ((cell->payload_len % 2) == 1) {
     log_fn(LOG_PROTOCOL_WARN, LD_OR,
            "Received a VERSION cell with odd payload length %d; "
            "closing connection.",cell->payload_len);
-    connection_or_close_for_error(chan->conn, 0);
+    connection_or_close_for_error(conn, 0);
     return;
   }
 
-  started_here = connection_or_nonopen_was_started_here(chan->conn);
+  started_here = connection_or_nonopen_was_started_here(conn);
 
-  if (chan->conn->link_proto != 0 ||
-      (chan->conn->handshake_state &&
-       chan->conn->handshake_state->received_versions)) {
+  if (conn->link_proto != 0 ||
+      (conn->handshake_state &&
+       conn->handshake_state->received_versions)) {
     log_fn(LOG_PROTOCOL_WARN, LD_OR,
            "Received a VERSIONS cell on a connection with its version "
            "already set to %d; dropping",
-           (int)(chan->conn->link_proto));
+           (int)(conn->link_proto));
     return;
   }
-  switch (chan->conn->base_.state)
+  switch (conn->base_.state)
     {
     case OR_CONN_STATE_OR_HANDSHAKING_V2:
     case OR_CONN_STATE_OR_HANDSHAKING_V3:
@@ -1491,7 +1557,7 @@ channel_tls_process_versions_cell(var_cell_t *cell, channel_tls_t *chan)
       return;
   }
 
-  tor_assert(chan->conn->handshake_state);
+  tor_assert(conn->handshake_state);
 
   {
     int i;
@@ -1506,7 +1572,7 @@ channel_tls_process_versions_cell(var_cell_t *cell, channel_tls_t *chan)
     log_fn(LOG_PROTOCOL_WARN, LD_OR,
            "Couldn't find a version in common between my version list and the "
            "list in the VERSIONS cell; closing connection.");
-    connection_or_close_for_error(chan->conn, 0);
+    connection_or_close_for_error(conn, 0);
     return;
   } else if (highest_supported_version == 1) {
     /* Negotiating version 1 makes no sense, since version 1 has no VERSIONS
@@ -1514,40 +1580,40 @@ channel_tls_process_versions_cell(var_cell_t *cell, channel_tls_t *chan)
     log_fn(LOG_PROTOCOL_WARN, LD_OR,
            "Used version negotiation protocol to negotiate a v1 connection. "
            "That's crazily non-compliant. Closing connection.");
-    connection_or_close_for_error(chan->conn, 0);
+    connection_or_close_for_error(conn, 0);
     return;
   } else if (highest_supported_version < 3 &&
-             chan->conn->base_.state == OR_CONN_STATE_OR_HANDSHAKING_V3) {
+             conn->base_.state == OR_CONN_STATE_OR_HANDSHAKING_V3) {
     log_fn(LOG_PROTOCOL_WARN, LD_OR,
            "Negotiated link protocol 2 or lower after doing a v3 TLS "
            "handshake. Closing connection.");
-    connection_or_close_for_error(chan->conn, 0);
+    connection_or_close_for_error(conn, 0);
     return;
   } else if (highest_supported_version != 2 &&
-             chan->conn->base_.state == OR_CONN_STATE_OR_HANDSHAKING_V2) {
+             conn->base_.state == OR_CONN_STATE_OR_HANDSHAKING_V2) {
     /* XXXX This should eventually be a log_protocol_warn */
     log_fn(LOG_WARN, LD_OR,
            "Negotiated link with non-2 protocol after doing a v2 TLS "
            "handshake with %s. Closing connection.",
-           fmt_addr(&chan->conn->base_.addr));
-    connection_or_close_for_error(chan->conn, 0);
+           fmt_addr(&conn->base_.addr));
+    connection_or_close_for_error(conn, 0);
     return;
   }
 
   rep_hist_note_negotiated_link_proto(highest_supported_version, started_here);
 
-  chan->conn->link_proto = highest_supported_version;
-  chan->conn->handshake_state->received_versions = 1;
+  conn->link_proto = highest_supported_version;
+  conn->handshake_state->received_versions = 1;
 
-  if (chan->conn->link_proto == 2) {
+  if (conn->link_proto == 2) {
     log_info(LD_OR,
              "Negotiated version %d with %s:%d; sending NETINFO.",
              highest_supported_version,
-             safe_str_client(chan->conn->base_.address),
-             chan->conn->base_.port);
+             safe_str_client(conn->base_.address),
+             conn->base_.port);
 
-    if (connection_or_send_netinfo(chan->conn) < 0) {
-      connection_or_close_for_error(chan->conn, 0);
+    if (connection_or_send_netinfo(conn) < 0) {
+      connection_or_close_for_error(conn, 0);
       return;
     }
   } else {
@@ -1561,13 +1627,13 @@ channel_tls_process_versions_cell(var_cell_t *cell, channel_tls_t *chan)
     const int send_netinfo = !started_here;
     const int send_any =
       send_versions || send_certs || send_chall || send_netinfo;
-    tor_assert(chan->conn->link_proto >= 3);
+    tor_assert(conn->link_proto >= 3);
 
     log_info(LD_OR,
              "Negotiated version %d with %s:%d; %s%s%s%s%s",
              highest_supported_version,
-             safe_str_client(chan->conn->base_.address),
-             chan->conn->base_.port,
+             safe_str_client(conn->base_.address),
+             conn->base_.port,
              send_any ? "Sending cells:" : "Waiting for CERTS cell",
              send_versions ? " VERSIONS" : "",
              send_certs ? " CERTS" : "",
@@ -1576,46 +1642,46 @@ channel_tls_process_versions_cell(var_cell_t *cell, channel_tls_t *chan)
 
 #ifdef DISABLE_V3_LINKPROTO_SERVERSIDE
     if (1) {
-      connection_or_close_normally(chan->conn, 1);
+      connection_or_close_normally(conn, 1);
       return;
     }
 #endif /* defined(DISABLE_V3_LINKPROTO_SERVERSIDE) */
 
     if (send_versions) {
-      if (connection_or_send_versions(chan->conn, 1) < 0) {
+      if (connection_or_send_versions(conn, 1) < 0) {
         log_warn(LD_OR, "Couldn't send versions cell");
-        connection_or_close_for_error(chan->conn, 0);
+        connection_or_close_for_error(conn, 0);
         return;
       }
     }
 
     /* We set this after sending the verions cell. */
     /*XXXXX symbolic const.*/
-    TLS_CHAN_TO_BASE(chan)->wide_circ_ids =
-      chan->conn->link_proto >= MIN_LINK_PROTO_FOR_WIDE_CIRC_IDS;
-    chan->conn->wide_circ_ids = TLS_CHAN_TO_BASE(chan)->wide_circ_ids;
+    chan->wide_circ_ids =
+      conn->link_proto >= MIN_LINK_PROTO_FOR_WIDE_CIRC_IDS;
+    conn->wide_circ_ids = chan->wide_circ_ids;
 
-    TLS_CHAN_TO_BASE(chan)->padding_enabled =
-      chan->conn->link_proto >= MIN_LINK_PROTO_FOR_CHANNEL_PADDING;
+    chan->padding_enabled =
+      conn->link_proto >= MIN_LINK_PROTO_FOR_CHANNEL_PADDING;
 
     if (send_certs) {
-      if (connection_or_send_certs_cell(chan->conn) < 0) {
+      if (connection_or_send_certs_cell(conn) < 0) {
         log_warn(LD_OR, "Couldn't send certs cell");
-        connection_or_close_for_error(chan->conn, 0);
+        connection_or_close_for_error(conn, 0);
         return;
       }
     }
     if (send_chall) {
-      if (connection_or_send_auth_challenge_cell(chan->conn) < 0) {
+      if (connection_or_send_auth_challenge_cell(conn) < 0) {
         log_warn(LD_OR, "Couldn't send auth_challenge cell");
-        connection_or_close_for_error(chan->conn, 0);
+        connection_or_close_for_error(conn, 0);
         return;
       }
     }
     if (send_netinfo) {
-      if (connection_or_send_netinfo(chan->conn) < 0) {
+      if (connection_or_send_netinfo(conn) < 0) {
         log_warn(LD_OR, "Couldn't send netinfo cell");
-        connection_or_close_for_error(chan->conn, 0);
+        connection_or_close_for_error(conn, 0);
         return;
       }
     }
@@ -1630,17 +1696,17 @@ channel_tls_process_versions_cell(var_cell_t *cell, channel_tls_t *chan)
  * value contents.
  */
 static void
-channel_tls_process_padding_negotiate_cell(cell_t *cell, channel_tls_t *chan)
+channel_tls_process_padding_negotiate_cell(cell_t *cell, channel_t *chan, or_connection_t* conn)
 {
   channelpadding_negotiate_t *negotiation;
   tor_assert(cell);
   tor_assert(chan);
-  tor_assert(chan->conn);
+  tor_assert(conn);
 
-  if (chan->conn->link_proto < MIN_LINK_PROTO_FOR_CHANNEL_PADDING) {
+  if (conn->link_proto < MIN_LINK_PROTO_FOR_CHANNEL_PADDING) {
     log_fn(LOG_PROTOCOL_WARN, LD_OR,
            "Received a PADDING_NEGOTIATE cell on v%d connection; dropping.",
-           chan->conn->link_proto);
+           conn->link_proto);
     return;
   }
 
@@ -1648,12 +1714,12 @@ channel_tls_process_padding_negotiate_cell(cell_t *cell, channel_tls_t *chan)
                                      CELL_PAYLOAD_SIZE) < 0) {
     log_fn(LOG_PROTOCOL_WARN, LD_OR,
           "Received malformed PADDING_NEGOTIATE cell on v%d connection; "
-          "dropping.", chan->conn->link_proto);
+          "dropping.", conn->link_proto);
 
     return;
   }
 
-  channelpadding_update_padding_for_channel(TLS_CHAN_TO_BASE(chan),
+  channelpadding_update_padding_for_channel(chan,
                                             negotiation);
 
   channelpadding_negotiate_free(negotiation);
@@ -1667,7 +1733,7 @@ channel_tls_process_padding_negotiate_cell(cell_t *cell, channel_tls_t *chan)
  */
 
 static void
-channel_tls_process_netinfo_cell(cell_t *cell, channel_tls_t *chan)
+channel_tls_process_netinfo_cell(cell_t *cell, channel_t *chan, or_connection_t *conn)
 {
   time_t timestamp;
   uint8_t my_addr_type;
@@ -1685,57 +1751,57 @@ channel_tls_process_netinfo_cell(cell_t *cell, channel_tls_t *chan)
 
   tor_assert(cell);
   tor_assert(chan);
-  tor_assert(chan->conn);
+  tor_assert(conn);
 
-  if (chan->conn->link_proto < 2) {
+  if (conn->link_proto < 2) {
     log_fn(LOG_PROTOCOL_WARN, LD_OR,
            "Received a NETINFO cell on %s connection; dropping.",
-           chan->conn->link_proto == 0 ? "non-versioned" : "a v1");
+           conn->link_proto == 0 ? "non-versioned" : "a v1");
     return;
   }
-  if (chan->conn->base_.state != OR_CONN_STATE_OR_HANDSHAKING_V2 &&
-      chan->conn->base_.state != OR_CONN_STATE_OR_HANDSHAKING_V3) {
+  if (conn->base_.state != OR_CONN_STATE_OR_HANDSHAKING_V2 &&
+      conn->base_.state != OR_CONN_STATE_OR_HANDSHAKING_V3) {
     log_fn(LOG_PROTOCOL_WARN, LD_OR,
            "Received a NETINFO cell on non-handshaking connection; dropping.");
     return;
   }
-  tor_assert(chan->conn->handshake_state &&
-             chan->conn->handshake_state->received_versions);
-  started_here = connection_or_nonopen_was_started_here(chan->conn);
-  identity_digest = chan->conn->identity_digest;
+  tor_assert(conn->handshake_state &&
+             conn->handshake_state->received_versions);
+  started_here = connection_or_nonopen_was_started_here(conn);
+  identity_digest = conn->identity_digest;
 
-  if (chan->conn->base_.state == OR_CONN_STATE_OR_HANDSHAKING_V3) {
-    tor_assert(chan->conn->link_proto >= 3);
+  if (conn->base_.state == OR_CONN_STATE_OR_HANDSHAKING_V3) {
+    tor_assert(conn->link_proto >= 3);
     if (started_here) {
-      if (!(chan->conn->handshake_state->authenticated)) {
+      if (!(conn->handshake_state->authenticated)) {
         log_fn(LOG_PROTOCOL_WARN, LD_OR,
                "Got a NETINFO cell from server, "
                "but no authentication.  Closing the connection.");
-        connection_or_close_for_error(chan->conn, 0);
+        connection_or_close_for_error(conn, 0);
         return;
       }
     } else {
       /* we're the server.  If the client never authenticated, we have
          some housekeeping to do.*/
-      if (!(chan->conn->handshake_state->authenticated)) {
+      if (!(conn->handshake_state->authenticated)) {
         tor_assert(tor_digest_is_zero(
-                  (const char*)(chan->conn->handshake_state->
+                  (const char*)(conn->handshake_state->
                       authenticated_rsa_peer_id)));
         tor_assert(tor_mem_is_zero(
-                  (const char*)(chan->conn->handshake_state->
+                  (const char*)(conn->handshake_state->
                                 authenticated_ed25519_peer_id.pubkey), 32));
         /* If the client never authenticated, it's a tor client or bridge
          * relay, and we must not use it for EXTEND requests (nor could we, as
          * there are no authenticated peer IDs) */
-        channel_mark_client(TLS_CHAN_TO_BASE(chan));
-        channel_set_circid_type(TLS_CHAN_TO_BASE(chan), NULL,
-               chan->conn->link_proto < MIN_LINK_PROTO_FOR_WIDE_CIRC_IDS);
+        channel_mark_client(chan);
+        channel_set_circid_type(chan, NULL,
+               conn->link_proto < MIN_LINK_PROTO_FOR_WIDE_CIRC_IDS);
 
-        connection_or_init_conn_from_address(chan->conn,
-                  &(chan->conn->base_.addr),
-                  chan->conn->base_.port,
+        connection_or_init_conn_from_address(conn,
+                  &(conn->base_.addr),
+                  conn->base_.port,
                   /* zero, checked above */
-                  (const char*)(chan->conn->handshake_state->
+                  (const char*)(conn->handshake_state->
                                 authenticated_rsa_peer_id),
                   NULL, /* Ed25519 ID: Also checked as zero */
                   0);
@@ -1745,7 +1811,7 @@ channel_tls_process_netinfo_cell(cell_t *cell, channel_tls_t *chan)
 
   /* Decode the cell. */
   timestamp = ntohl(get_uint32(cell->payload));
-  if (labs(now - chan->conn->handshake_state->sent_versions_at) < 180) {
+  if (labs(now - conn->handshake_state->sent_versions_at) < 180) {
     apparent_skew = now - timestamp;
   }
 
@@ -1766,7 +1832,7 @@ channel_tls_process_netinfo_cell(cell_t *cell, channel_tls_t *chan)
 
     if (!get_options()->BridgeRelay && me &&
         get_uint32(my_addr_ptr) == htonl(me->addr)) {
-      TLS_CHAN_TO_BASE(chan)->is_canonical_to_peer = 1;
+      chan->is_canonical_to_peer = 1;
     }
 
   } else if (my_addr_type == RESOLVED_TYPE_IPV6 && my_addr_len == 16) {
@@ -1775,7 +1841,7 @@ channel_tls_process_netinfo_cell(cell_t *cell, channel_tls_t *chan)
     if (!get_options()->BridgeRelay && me &&
         !tor_addr_is_null(&me->ipv6_addr) &&
         tor_addr_eq(&my_apparent_addr, &me->ipv6_addr)) {
-      TLS_CHAN_TO_BASE(chan)->is_canonical_to_peer = 1;
+      chan->is_canonical_to_peer = 1;
     }
   }
 
@@ -1789,7 +1855,7 @@ channel_tls_process_netinfo_cell(cell_t *cell, channel_tls_t *chan)
     if (next == NULL) {
       log_fn(LOG_PROTOCOL_WARN,  LD_OR,
              "Bad address in netinfo cell; closing connection.");
-      connection_or_close_for_error(chan->conn, 0);
+      connection_or_close_for_error(conn, 0);
       return;
     }
     /* A relay can connect from anywhere and be canonical, so
@@ -1799,18 +1865,18 @@ channel_tls_process_netinfo_cell(cell_t *cell, channel_tls_t *chan)
      * might be doing something funny, but nobody else is doing a MITM
      * on the relay's TCP.
      */
-    if (tor_addr_eq(&addr, &(chan->conn->real_addr))) {
-      connection_or_set_canonical(chan->conn, 1);
+    if (tor_addr_eq(&addr, &(conn->real_addr))) {
+      connection_or_set_canonical(conn, 1);
       break;
     }
     cp = next;
     --n_other_addrs;
   }
 
-  if (me && !TLS_CHAN_TO_BASE(chan)->is_canonical_to_peer &&
-      channel_is_canonical(TLS_CHAN_TO_BASE(chan))) {
+  if (me && !chan->is_canonical_to_peer &&
+      channel_is_canonical(chan)) {
     const char *descr =
-      TLS_CHAN_TO_BASE(chan)->get_remote_descr(TLS_CHAN_TO_BASE(chan), 0);
+      chan->get_remote_descr(chan, 0);
     log_info(LD_OR,
              "We made a connection to a relay at %s (fp=%s) but we think "
              "they will not consider this connection canonical. They "
@@ -1827,45 +1893,45 @@ channel_tls_process_netinfo_cell(cell_t *cell, channel_tls_t *chan)
 #define NETINFO_NOTICE_SKEW 3600
   if (labs(apparent_skew) > NETINFO_NOTICE_SKEW &&
       (started_here ||
-       connection_or_digest_is_known_relay(chan->conn->identity_digest))) {
-    int trusted = router_digest_is_trusted_dir(chan->conn->identity_digest);
-    clock_skew_warning(TO_CONN(chan->conn), apparent_skew, trusted, LD_GENERAL,
+       connection_or_digest_is_known_relay(conn->identity_digest))) {
+    int trusted = router_digest_is_trusted_dir(conn->identity_digest);
+    clock_skew_warning(TO_CONN(conn), apparent_skew, trusted, LD_GENERAL,
                        "NETINFO cell", "OR");
   }
 
   /* XXX maybe act on my_apparent_addr, if the source is sufficiently
    * trustworthy. */
 
-  if (! chan->conn->handshake_state->sent_netinfo) {
+  if (! conn->handshake_state->sent_netinfo) {
     /* If we were prepared to authenticate, but we never got an AUTH_CHALLENGE
      * cell, then we would not previously have sent a NETINFO cell. Do so
      * now. */
-    if (connection_or_send_netinfo(chan->conn) < 0) {
-      connection_or_close_for_error(chan->conn, 0);
+    if (connection_or_send_netinfo(conn) < 0) {
+      connection_or_close_for_error(conn, 0);
       return;
     }
   }
 
-  if (connection_or_set_state_open(chan->conn) < 0) {
+  if (connection_or_set_state_open(conn) < 0) {
     log_fn(LOG_PROTOCOL_WARN, LD_OR,
            "Got good NETINFO cell from %s:%d; but "
            "was unable to make the OR connection become open.",
-           safe_str_client(chan->conn->base_.address),
-           chan->conn->base_.port);
-    connection_or_close_for_error(chan->conn, 0);
+           safe_str_client(conn->base_.address),
+           conn->base_.port);
+    connection_or_close_for_error(conn, 0);
   } else {
     log_info(LD_OR,
              "Got good NETINFO cell from %s:%d; OR connection is now "
              "open, using protocol version %d. Its ID digest is %s. "
              "Our address is apparently %s.",
-             safe_str_client(chan->conn->base_.address),
-             chan->conn->base_.port,
-             (int)(chan->conn->link_proto),
+             safe_str_client(conn->base_.address),
+             conn->base_.port,
+             (int)(conn->link_proto),
              hex_str(identity_digest, DIGEST_LEN),
              tor_addr_is_null(&my_apparent_addr) ?
              "<none>" : fmt_and_decorate_addr(&my_apparent_addr));
   }
-  assert_connection_ok(TO_CONN(chan->conn),time(NULL));
+  assert_connection_ok(TO_CONN(conn),time(NULL));
 }
 
 /** Types of certificates that we know how to parse from CERTS cells.  Each
@@ -1919,7 +1985,7 @@ certs_cell_typenum_to_cert_type(int typenum)
  * If it's the server side, wait for an AUTHENTICATE cell.
  */
 STATIC void
-channel_tls_process_certs_cell(var_cell_t *cell, channel_tls_t *chan)
+channel_tls_process_certs_cell(var_cell_t *cell, channel_t *chan, or_connection_t *conn)
 {
 #define MAX_CERT_TYPE_WANTED CERTTYPE_RSA1024_ID_EDID
   /* These arrays will be sparse, since a cert type can be at most one
@@ -1938,30 +2004,30 @@ channel_tls_process_certs_cell(var_cell_t *cell, channel_tls_t *chan)
   memset(ed_certs, 0, sizeof(ed_certs));
   tor_assert(cell);
   tor_assert(chan);
-  tor_assert(chan->conn);
+  tor_assert(conn);
 
 #define ERR(s)                                                  \
   do {                                                          \
     log_fn(LOG_PROTOCOL_WARN, LD_PROTOCOL,                      \
            "Received a bad CERTS cell from %s:%d: %s",          \
-           safe_str(chan->conn->base_.address),                 \
-           chan->conn->base_.port, (s));                        \
-    connection_or_close_for_error(chan->conn, 0);               \
+           safe_str(conn->base_.address),                 \
+           conn->base_.port, (s));                        \
+    connection_or_close_for_error(conn, 0);               \
     goto err;                                                   \
   } while (0)
 
   /* Can't use connection_or_nonopen_was_started_here(); its conn->tls
    * check looks like it breaks
    * test_link_handshake_recv_certs_ok_server().  */
-  started_here = chan->conn->handshake_state->started_here;
+  started_here = conn->handshake_state->started_here;
 
-  if (chan->conn->base_.state != OR_CONN_STATE_OR_HANDSHAKING_V3)
+  if (conn->base_.state != OR_CONN_STATE_OR_HANDSHAKING_V3)
     ERR("We're not doing a v3 handshake!");
-  if (chan->conn->link_proto < 3)
+  if (conn->link_proto < 3)
     ERR("We're not using link protocol >= 3");
-  if (chan->conn->handshake_state->received_certs_cell)
+  if (conn->handshake_state->received_certs_cell)
     ERR("We already got one");
-  if (chan->conn->handshake_state->authenticated) {
+  if (conn->handshake_state->authenticated) {
     /* Should be unreachable, but let's make sure. */
     ERR("We're already authenticated!");
   }
@@ -1994,8 +2060,8 @@ channel_tls_process_certs_cell(var_cell_t *cell, channel_tls_t *chan)
         if (!x509_cert) {
           log_fn(LOG_PROTOCOL_WARN, LD_PROTOCOL,
                  "Received undecodable certificate in CERTS cell from %s:%d",
-                 safe_str(chan->conn->base_.address),
-               chan->conn->base_.port);
+                 safe_str(conn->base_.address),
+               conn->base_.port);
         } else {
           if (x509_certs[cert_type]) {
             tor_x509_cert_free(x509_cert);
@@ -2012,8 +2078,8 @@ channel_tls_process_certs_cell(var_cell_t *cell, channel_tls_t *chan)
           log_fn(LOG_PROTOCOL_WARN, LD_PROTOCOL,
                  "Received undecodable Ed certificate "
                  "in CERTS cell from %s:%d",
-                 safe_str(chan->conn->base_.address),
-               chan->conn->base_.port);
+                 safe_str(conn->base_.address),
+               conn->base_.port);
         } else {
           if (ed_certs[cert_type]) {
             tor_cert_free(ed_cert);
@@ -2042,9 +2108,9 @@ channel_tls_process_certs_cell(var_cell_t *cell, channel_tls_t *chan)
   tor_x509_cert_t *id_cert = x509_certs[CERTTYPE_RSA1024_ID_ID];
   tor_x509_cert_t *auth_cert = x509_certs[CERTTYPE_RSA1024_ID_AUTH];
   tor_x509_cert_t *link_cert = x509_certs[CERTTYPE_RSA1024_ID_LINK];
-  chan->conn->handshake_state->certs->auth_cert = auth_cert;
-  chan->conn->handshake_state->certs->link_cert = link_cert;
-  chan->conn->handshake_state->certs->id_cert = id_cert;
+  conn->handshake_state->certs->auth_cert = auth_cert;
+  conn->handshake_state->certs->link_cert = link_cert;
+  conn->handshake_state->certs->id_cert = id_cert;
   x509_certs[CERTTYPE_RSA1024_ID_ID] =
     x509_certs[CERTTYPE_RSA1024_ID_AUTH] =
     x509_certs[CERTTYPE_RSA1024_ID_LINK] = NULL;
@@ -2052,15 +2118,15 @@ channel_tls_process_certs_cell(var_cell_t *cell, channel_tls_t *chan)
   tor_cert_t *ed_id_sign = ed_certs[CERTTYPE_ED_ID_SIGN];
   tor_cert_t *ed_sign_link = ed_certs[CERTTYPE_ED_SIGN_LINK];
   tor_cert_t *ed_sign_auth = ed_certs[CERTTYPE_ED_SIGN_AUTH];
-  chan->conn->handshake_state->certs->ed_id_sign = ed_id_sign;
-  chan->conn->handshake_state->certs->ed_sign_link = ed_sign_link;
-  chan->conn->handshake_state->certs->ed_sign_auth = ed_sign_auth;
+  conn->handshake_state->certs->ed_id_sign = ed_id_sign;
+  conn->handshake_state->certs->ed_sign_link = ed_sign_link;
+  conn->handshake_state->certs->ed_sign_auth = ed_sign_auth;
   ed_certs[CERTTYPE_ED_ID_SIGN] =
     ed_certs[CERTTYPE_ED_SIGN_LINK] =
     ed_certs[CERTTYPE_ED_SIGN_AUTH] = NULL;
 
-  chan->conn->handshake_state->certs->ed_rsa_crosscert = rsa_ed_cc_cert;
-  chan->conn->handshake_state->certs->ed_rsa_crosscert_len =
+  conn->handshake_state->certs->ed_rsa_crosscert = rsa_ed_cc_cert;
+  conn->handshake_state->certs->ed_rsa_crosscert_len =
     rsa_ed_cc_cert_len;
   rsa_ed_cc_cert = NULL;
 
@@ -2069,7 +2135,7 @@ channel_tls_process_certs_cell(var_cell_t *cell, channel_tls_t *chan)
    * _trying_ to connect to an authority, not necessarily if we _did_ connect
    * to one. */
   if (started_here &&
-      router_digest_is_trusted_dir(TLS_CHAN_TO_BASE(chan)->identity_digest))
+      router_digest_is_trusted_dir(chan->identity_digest))
     severity = LOG_WARN;
   else
     severity = LOG_PROTOCOL_WARN;
@@ -2077,8 +2143,8 @@ channel_tls_process_certs_cell(var_cell_t *cell, channel_tls_t *chan)
   const ed25519_public_key_t *checked_ed_id = NULL;
   const common_digests_t *checked_rsa_id = NULL;
   or_handshake_certs_check_both(severity,
-                                chan->conn->handshake_state->certs,
-                                chan->conn->tls,
+                                conn->handshake_state->certs,
+                                conn->tls,
                                 time(NULL),
                                 &checked_ed_id,
                                 &checked_rsa_id);
@@ -2089,8 +2155,8 @@ channel_tls_process_certs_cell(var_cell_t *cell, channel_tls_t *chan)
   if (started_here) {
     /* No more information is needed. */
 
-    chan->conn->handshake_state->authenticated = 1;
-    chan->conn->handshake_state->authenticated_rsa = 1;
+    conn->handshake_state->authenticated = 1;
+    conn->handshake_state->authenticated_rsa = 1;
     {
       const common_digests_t *id_digests = checked_rsa_id;
       crypto_pk_t *identity_rcvd;
@@ -2101,31 +2167,31 @@ channel_tls_process_certs_cell(var_cell_t *cell, channel_tls_t *chan)
       if (!identity_rcvd) {
         ERR("Couldn't get RSA key from ID cert.");
       }
-      memcpy(chan->conn->handshake_state->authenticated_rsa_peer_id,
+      memcpy(conn->handshake_state->authenticated_rsa_peer_id,
              id_digests->d[DIGEST_SHA1], DIGEST_LEN);
-      channel_set_circid_type(TLS_CHAN_TO_BASE(chan), identity_rcvd,
-                chan->conn->link_proto < MIN_LINK_PROTO_FOR_WIDE_CIRC_IDS);
+      channel_set_circid_type(chan, identity_rcvd,
+                conn->link_proto < MIN_LINK_PROTO_FOR_WIDE_CIRC_IDS);
       crypto_pk_free(identity_rcvd);
     }
 
     if (checked_ed_id) {
-      chan->conn->handshake_state->authenticated_ed25519 = 1;
-      memcpy(&chan->conn->handshake_state->authenticated_ed25519_peer_id,
+      conn->handshake_state->authenticated_ed25519 = 1;
+      memcpy(&conn->handshake_state->authenticated_ed25519_peer_id,
              checked_ed_id, sizeof(ed25519_public_key_t));
     }
 
     log_debug(LD_HANDSHAKE, "calling client_learned_peer_id from "
               "process_certs_cell");
 
-    if (connection_or_client_learned_peer_id(chan->conn,
-                  chan->conn->handshake_state->authenticated_rsa_peer_id,
+    if (connection_or_client_learned_peer_id(conn,
+                  conn->handshake_state->authenticated_rsa_peer_id,
                   checked_ed_id) < 0)
       ERR("Problem setting or checking peer id");
 
     log_info(LD_HANDSHAKE,
              "Got some good certificates from %s:%d: Authenticated it with "
              "RSA%s",
-             safe_str(chan->conn->base_.address), chan->conn->base_.port,
+             safe_str(conn->base_.address), conn->base_.port,
              checked_ed_id ? " and Ed25519" : "");
 
     if (!public_server_mode(get_options())) {
@@ -2140,17 +2206,17 @@ channel_tls_process_certs_cell(var_cell_t *cell, channel_tls_t *chan)
              "Got some good RSA%s certificates from %s:%d. "
              "Waiting for AUTHENTICATE.",
              checked_ed_id ? " and Ed25519" : "",
-             safe_str(chan->conn->base_.address),
-             chan->conn->base_.port);
+             safe_str(conn->base_.address),
+             conn->base_.port);
     /* XXXX check more stuff? */
   }
 
-  chan->conn->handshake_state->received_certs_cell = 1;
+  conn->handshake_state->received_certs_cell = 1;
 
   if (send_netinfo) {
-    if (connection_or_send_netinfo(chan->conn) < 0) {
+    if (connection_or_send_netinfo(conn) < 0) {
       log_warn(LD_OR, "Couldn't send netinfo cell");
-      connection_or_close_for_error(chan->conn, 0);
+      connection_or_close_for_error(conn, 0);
       goto err;
     }
   }
@@ -2179,34 +2245,34 @@ channel_tls_process_certs_cell(var_cell_t *cell, channel_tls_t *chan)
  */
 
 STATIC void
-channel_tls_process_auth_challenge_cell(var_cell_t *cell, channel_tls_t *chan)
+channel_tls_process_auth_challenge_cell(var_cell_t *cell,channel_t *chan, or_connection_t *conn)
 {
   int n_types, i, use_type = -1;
   auth_challenge_cell_t *ac = NULL;
 
   tor_assert(cell);
   tor_assert(chan);
-  tor_assert(chan->conn);
+  tor_assert(conn);
 
 #define ERR(s)                                                  \
   do {                                                          \
     log_fn(LOG_PROTOCOL_WARN, LD_PROTOCOL,                      \
            "Received a bad AUTH_CHALLENGE cell from %s:%d: %s", \
-           safe_str(chan->conn->base_.address),                 \
-           chan->conn->base_.port, (s));                        \
-    connection_or_close_for_error(chan->conn, 0);               \
+           safe_str(conn->base_.address),                 \
+           conn->base_.port, (s));                        \
+    connection_or_close_for_error(conn, 0);               \
     goto done;                                                  \
   } while (0)
 
-  if (chan->conn->base_.state != OR_CONN_STATE_OR_HANDSHAKING_V3)
+  if (conn->base_.state != OR_CONN_STATE_OR_HANDSHAKING_V3)
     ERR("We're not currently doing a v3 handshake");
-  if (chan->conn->link_proto < 3)
+  if (conn->link_proto < 3)
     ERR("We're not using link protocol >= 3");
-  if (!(chan->conn->handshake_state->started_here))
+  if (!(conn->handshake_state->started_here))
     ERR("We didn't originate this connection");
-  if (chan->conn->handshake_state->received_auth_challenge)
+  if (conn->handshake_state->received_auth_challenge)
     ERR("We already received one");
-  if (!(chan->conn->handshake_state->received_certs_cell))
+  if (!(conn->handshake_state->received_certs_cell))
     ERR("We haven't gotten a CERTS cell yet");
   if (cell->circ_id)
     ERR("It had a nonzero circuit ID");
@@ -2227,7 +2293,7 @@ channel_tls_process_auth_challenge_cell(var_cell_t *cell, channel_tls_t *chan)
     }
   }
 
-  chan->conn->handshake_state->received_auth_challenge = 1;
+  conn->handshake_state->received_auth_challenge = 1;
 
   if (! public_server_mode(get_options())) {
     /* If we're not a public server then we don't want to authenticate on a
@@ -2240,27 +2306,27 @@ channel_tls_process_auth_challenge_cell(var_cell_t *cell, channel_tls_t *chan)
     log_info(LD_OR,
              "Got an AUTH_CHALLENGE cell from %s:%d: Sending "
              "authentication type %d",
-             safe_str(chan->conn->base_.address),
-             chan->conn->base_.port,
+             safe_str(conn->base_.address),
+             conn->base_.port,
              use_type);
 
-    if (connection_or_send_authenticate_cell(chan->conn, use_type) < 0) {
+    if (connection_or_send_authenticate_cell(conn, use_type) < 0) {
       log_warn(LD_OR,
                "Couldn't send authenticate cell");
-      connection_or_close_for_error(chan->conn, 0);
+      connection_or_close_for_error(conn, 0);
       goto done;
     }
   } else {
     log_info(LD_OR,
              "Got an AUTH_CHALLENGE cell from %s:%d, but we don't "
              "know any of its authentication types. Not authenticating.",
-             safe_str(chan->conn->base_.address),
-             chan->conn->base_.port);
+             safe_str(conn->base_.address),
+             conn->base_.port);
   }
 
-  if (connection_or_send_netinfo(chan->conn) < 0) {
+  if (connection_or_send_netinfo(conn) < 0) {
     log_warn(LD_OR, "Couldn't send netinfo cell");
-    connection_or_close_for_error(chan->conn, 0);
+    connection_or_close_for_error(conn, 0);
     goto done;
   }
 
@@ -2281,7 +2347,7 @@ channel_tls_process_auth_challenge_cell(var_cell_t *cell, channel_tls_t *chan)
  */
 
 STATIC void
-channel_tls_process_authenticate_cell(var_cell_t *cell, channel_tls_t *chan)
+channel_tls_process_authenticate_cell(var_cell_t *cell, channel_t *chan, or_connection_t *conn)
 {
   var_cell_t *expected_cell = NULL;
   const uint8_t *auth;
@@ -2291,34 +2357,34 @@ channel_tls_process_authenticate_cell(var_cell_t *cell, channel_tls_t *chan)
 
   tor_assert(cell);
   tor_assert(chan);
-  tor_assert(chan->conn);
+  tor_assert(conn);
 
 #define ERR(s)                                                  \
   do {                                                          \
     log_fn(LOG_PROTOCOL_WARN, LD_PROTOCOL,                      \
            "Received a bad AUTHENTICATE cell from %s:%d: %s",   \
-           safe_str(chan->conn->base_.address),                 \
-           chan->conn->base_.port, (s));                        \
-    connection_or_close_for_error(chan->conn, 0);               \
+           safe_str(conn->base_.address),                 \
+           conn->base_.port, (s));                        \
+    connection_or_close_for_error(conn, 0);               \
     var_cell_free(expected_cell);                               \
     return;                                                     \
   } while (0)
 
-  if (chan->conn->base_.state != OR_CONN_STATE_OR_HANDSHAKING_V3)
+  if (conn->base_.state != OR_CONN_STATE_OR_HANDSHAKING_V3)
     ERR("We're not doing a v3 handshake");
-  if (chan->conn->link_proto < 3)
+  if (conn->link_proto < 3)
     ERR("We're not using link protocol >= 3");
-  if (chan->conn->handshake_state->started_here)
+  if (conn->handshake_state->started_here)
     ERR("We originated this connection");
-  if (chan->conn->handshake_state->received_authenticate)
+  if (conn->handshake_state->received_authenticate)
     ERR("We already got one!");
-  if (chan->conn->handshake_state->authenticated) {
+  if (conn->handshake_state->authenticated) {
     /* Should be impossible given other checks */
     ERR("The peer is already authenticated");
   }
-  if (!(chan->conn->handshake_state->received_certs_cell))
+  if (!(conn->handshake_state->received_certs_cell))
     ERR("We never got a certs cell");
-  if (chan->conn->handshake_state->certs->id_cert == NULL)
+  if (conn->handshake_state->certs->id_cert == NULL)
     ERR("We never got an identity certificate");
   if (cell->payload_len < 4)
     ERR("Cell was way too short");
@@ -2342,7 +2408,7 @@ channel_tls_process_authenticate_cell(var_cell_t *cell, channel_tls_t *chan)
     ERR("Authenticator was too short");
 
   expected_cell = connection_or_compute_authenticate_cell_body(
-                chan->conn, authtype, NULL, NULL, 1);
+                conn, authtype, NULL, NULL, 1);
   if (! expected_cell)
     ERR("Couldn't compute expected AUTHENTICATE cell body");
 
@@ -2374,14 +2440,14 @@ channel_tls_process_authenticate_cell(var_cell_t *cell, channel_tls_t *chan)
     ERR("Some field in the AUTHENTICATE cell body was not as expected");
 
   if (sig_is_rsa) {
-    if (chan->conn->handshake_state->certs->ed_id_sign != NULL)
+    if (conn->handshake_state->certs->ed_id_sign != NULL)
       ERR("RSA-signed AUTHENTICATE response provided with an ED25519 cert");
 
-    if (chan->conn->handshake_state->certs->auth_cert == NULL)
+    if (conn->handshake_state->certs->auth_cert == NULL)
       ERR("We never got an RSA authentication certificate");
 
     crypto_pk_t *pk = tor_tls_cert_get_key(
-                             chan->conn->handshake_state->certs->auth_cert);
+                             conn->handshake_state->certs->auth_cert);
     char d[DIGEST256_LEN];
     char *signed_data;
     size_t keysize;
@@ -2414,13 +2480,13 @@ channel_tls_process_authenticate_cell(var_cell_t *cell, channel_tls_t *chan)
     }
     tor_free(signed_data);
   } else {
-    if (chan->conn->handshake_state->certs->ed_id_sign == NULL)
+    if (conn->handshake_state->certs->ed_id_sign == NULL)
       ERR("We never got an Ed25519 identity certificate.");
-    if (chan->conn->handshake_state->certs->ed_sign_auth == NULL)
+    if (conn->handshake_state->certs->ed_sign_auth == NULL)
       ERR("We never got an Ed25519 authentication certificate.");
 
     const ed25519_public_key_t *authkey =
-      &chan->conn->handshake_state->certs->ed_sign_auth->signed_key;
+      &conn->handshake_state->certs->ed_sign_auth->signed_key;
     ed25519_signature_t sig;
     tor_assert(authlen > ED25519_SIG_LEN);
     memcpy(&sig.sig, auth + authlen - ED25519_SIG_LEN, ED25519_SIG_LEN);
@@ -2430,53 +2496,53 @@ channel_tls_process_authenticate_cell(var_cell_t *cell, channel_tls_t *chan)
   }
 
   /* Okay, we are authenticated. */
-  chan->conn->handshake_state->received_authenticate = 1;
-  chan->conn->handshake_state->authenticated = 1;
-  chan->conn->handshake_state->authenticated_rsa = 1;
-  chan->conn->handshake_state->digest_received_data = 0;
+  conn->handshake_state->received_authenticate = 1;
+  conn->handshake_state->authenticated = 1;
+  conn->handshake_state->authenticated_rsa = 1;
+  conn->handshake_state->digest_received_data = 0;
   {
-    tor_x509_cert_t *id_cert = chan->conn->handshake_state->certs->id_cert;
+    tor_x509_cert_t *id_cert = conn->handshake_state->certs->id_cert;
     crypto_pk_t *identity_rcvd = tor_tls_cert_get_key(id_cert);
     const common_digests_t *id_digests = tor_x509_cert_get_id_digests(id_cert);
     const ed25519_public_key_t *ed_identity_received = NULL;
 
     if (! sig_is_rsa) {
-      chan->conn->handshake_state->authenticated_ed25519 = 1;
+      conn->handshake_state->authenticated_ed25519 = 1;
       ed_identity_received =
-        &chan->conn->handshake_state->certs->ed_id_sign->signing_key;
-      memcpy(&chan->conn->handshake_state->authenticated_ed25519_peer_id,
+        &conn->handshake_state->certs->ed_id_sign->signing_key;
+      memcpy(&conn->handshake_state->authenticated_ed25519_peer_id,
              ed_identity_received, sizeof(ed25519_public_key_t));
     }
 
     /* This must exist; we checked key type when reading the cert. */
     tor_assert(id_digests);
 
-    memcpy(chan->conn->handshake_state->authenticated_rsa_peer_id,
+    memcpy(conn->handshake_state->authenticated_rsa_peer_id,
            id_digests->d[DIGEST_SHA1], DIGEST_LEN);
 
-    channel_set_circid_type(TLS_CHAN_TO_BASE(chan), identity_rcvd,
-               chan->conn->link_proto < MIN_LINK_PROTO_FOR_WIDE_CIRC_IDS);
+    channel_set_circid_type(chan, identity_rcvd,
+               conn->link_proto < MIN_LINK_PROTO_FOR_WIDE_CIRC_IDS);
     crypto_pk_free(identity_rcvd);
 
     log_debug(LD_HANDSHAKE,
               "Calling connection_or_init_conn_from_address for %s "
               " from %s, with%s ed25519 id.",
-              safe_str(chan->conn->base_.address),
+              safe_str(conn->base_.address),
               __func__,
               ed_identity_received ? "" : "out");
 
-    connection_or_init_conn_from_address(chan->conn,
-                  &(chan->conn->base_.addr),
-                  chan->conn->base_.port,
-                  (const char*)(chan->conn->handshake_state->
+    connection_or_init_conn_from_address(conn,
+                  &(conn->base_.addr),
+                  conn->base_.port,
+                  (const char*)(conn->handshake_state->
                     authenticated_rsa_peer_id),
                   ed_identity_received,
                   0);
 
     log_debug(LD_HANDSHAKE,
              "Got an AUTHENTICATE cell from %s:%d, type %d: Looks good.",
-             safe_str(chan->conn->base_.address),
-             chan->conn->base_.port,
+             safe_str(conn->base_.address),
+             conn->base_.port,
              authtype);
   }
 

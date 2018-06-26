@@ -51,6 +51,7 @@
 #include "backtrace.h"
 #include "buffers.h"
 #include "channel.h"
+#include "channeltls.h"
 #include "circpathbias.h"
 #include "circuitbuild.h"
 #include "circuitlist.h"
@@ -2698,7 +2699,7 @@ set_streams_blocked_on_circ(circuit_t *circ, channel_t *chan,
 }
 
 /** Extract the command from a packed cell. */
-static uint8_t
+uint8_t
 packed_cell_get_command(const packed_cell_t *cell, int wide_circ_ids)
 {
   if (wide_circ_ids) {
@@ -2716,6 +2717,17 @@ packed_cell_get_circid(const packed_cell_t *cell, int wide_circ_ids)
     return ntohl(get_uint32(cell->body));
   } else {
     return ntohs(get_uint16(cell->body));
+  }
+}
+
+/** Extract the sequence from a packed cell. */
+uint32_t
+packed_cell_get_sequence(const packed_cell_t *cell, int wide_circ_ids)
+{
+  if (wide_circ_ids) {
+    return ntohl(get_uint32(cell->body+5));
+  } else {
+    return ntohl(get_uint32(cell->body+3));
   }
 }
 
@@ -2746,7 +2758,7 @@ channel_flush_from_first_active_circuit, (channel_t *chan, int max))
       /* this code is duplicated from some of the logic below. Ugly! XXXX */
       tor_assert(destroy_queue->n > 0);
       cell = cell_queue_pop(destroy_queue);
-      channel_write_packed_cell(chan, cell);
+      channel_write_packed_cell(chan, NULL, circ, cell);
       /* Update the cmux destroy counter */
       circuitmux_notify_xmit_destroy(cmux);
       cell = NULL;
@@ -2823,7 +2835,7 @@ channel_flush_from_first_active_circuit, (channel_t *chan, int max))
                                 DIRREQ_CIRC_QUEUE_FLUSHED);
 
     /* Now send the cell */
-    channel_write_packed_cell(chan, cell);
+    channel_write_packed_cell(chan, NULL, circ, cell);
     cell = NULL;
 
     /*
@@ -2882,6 +2894,8 @@ append_cell_to_circuit_queue(circuit_t *circ, channel_t *chan,
   or_circuit_t *orcirc = NULL;
   cell_queue_t *queue;
   int streams_blocked;
+  int next_seq = 0;
+
 #if 0
   uint32_t tgt_max_middle_cells, p_len, n_len, tmp, hard_max_middle_cells;
 #endif
@@ -2894,10 +2908,12 @@ append_cell_to_circuit_queue(circuit_t *circ, channel_t *chan,
   if (exitward) {
     queue = &circ->n_chan_cells;
     streams_blocked = circ->streams_blocked_on_n_chan;
+    next_seq = (++(circ->n_sequence));
   } else {
     orcirc = TO_OR_CIRCUIT(circ);
     queue = &orcirc->p_chan_cells;
     streams_blocked = circ->streams_blocked_on_p_chan;
+    next_seq = (++(circ->p_sequence));
   }
 
   /*
@@ -2982,6 +2998,8 @@ append_cell_to_circuit_queue(circuit_t *circ, channel_t *chan,
   }
 #endif /* 0 */
 
+  cell->sequence = next_seq;
+
   cell_queue_append_packed_copy(circ, queue, exitward, cell,
                                 chan->wide_circ_ids, 1);
 
@@ -3007,6 +3025,18 @@ append_cell_to_circuit_queue(circuit_t *circ, channel_t *chan,
      * circuit active. */
     log_debug(LD_GENERAL, "Made a circuit active.");
   }
+
+  if(get_options()->GlobalSchedulerUSec) {
+    channel_start_writing(chan);
+  } else if (!channel_has_queued_writes(chan)) {
+    /* There is no data at all waiting to be sent on the outbuf.  Add a
+     * cell, so that we can notice when it gets flushed, flushed_some can
+     * get called, and we can start putting more data onto the buffer then.
+     */
+    log_debug(LD_GENERAL, "Primed a buffer.");
+    channel_flush_from_first_active_circuit(chan, 1);
+  }
+
 
   /* New way: mark this as having waiting cells for the scheduler */
   scheduler_channel_has_waiting_cells(chan);

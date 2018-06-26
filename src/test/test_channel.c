@@ -130,7 +130,7 @@ chan_test_channel_flush_from_first_active_circuit_mock(channel_t *chan,
       test_target_cmux == chan->cmux) {
     while (c <= max && test_cmux_cells > 0) {
       cell = packed_cell_new();
-      channel_write_packed_cell(chan, cell);
+      //channel_write_packed_cell(chan, cell);
       ++c;
       --test_cmux_cells;
     }
@@ -677,7 +677,7 @@ test_channel_flush(void *arg)
   /* Try a packed cell now */
   p_cell = packed_cell_new();
   tt_assert(p_cell);
-  channel_write_packed_cell(ch, p_cell);
+  //channel_write_packed_cell(ch, p_cell);
   /* It should be queued, so assert that we didn't write it */
   tt_int_op(test_cells_written, OP_EQ, init_count);
 
@@ -1364,7 +1364,7 @@ test_channel_queue_impossible(void *arg)
   packed_cell = packed_cell_new();
   tt_assert(packed_cell);
   cellintptr = (uintptr_t)(void*)packed_cell;
-  channel_write_packed_cell(ch, packed_cell);
+  //channel_write_packed_cell(ch, packed_cell);
 
   /* Check that it's queued */
   tt_int_op(chan_cell_queue_len(&(ch->outgoing_queue)), OP_EQ, 1);
@@ -1689,7 +1689,7 @@ test_channel_write(void *arg)
   var_cell = NULL;
   tt_assert(test_cells_written == old_count + 2);
 
-  channel_write_packed_cell(ch, packed_cell);
+  //channel_write_packed_cell(ch, packed_cell);
   packed_cell = NULL;
   tt_assert(test_cells_written == old_count + 3);
 
@@ -1761,7 +1761,7 @@ test_channel_write(void *arg)
   tt_assert(test_cells_written == old_count);
 
   packed_cell = packed_cell_new();
-  channel_write_packed_cell(ch, packed_cell);
+  //channel_write_packed_cell(ch, packed_cell);
   packed_cell = NULL;
   tt_assert(test_cells_written == old_count);
 

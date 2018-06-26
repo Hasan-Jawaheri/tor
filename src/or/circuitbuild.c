@@ -64,6 +64,10 @@
 #include "routerset.h"
 #include "transports.h"
 
+#ifdef CURVE25519_ENABLED
+static int circuits_can_use_ntor(void);
+#endif
+
 static channel_t * channel_connect_for_circuit(const tor_addr_t *addr,
                                             uint16_t port,
                                             const char *id_digest,
@@ -92,7 +96,7 @@ channel_connect_for_circuit(const tor_addr_t *addr, uint16_t port,
 {
   channel_t *chan;
 
-  chan = channel_connect(addr, port, id_digest, ed_id);
+  chan = channel_connect(addr, port, id_digest, ed_id, get_options()->ChannelType);
   if (chan) command_setup_channel(chan);
 
   return chan;
@@ -134,6 +138,14 @@ get_unique_circ_id_by_chan(channel_t *chan)
   mask = max_range - 1;
   high_bit = (chan->circ_id_type == CIRC_ID_TYPE_HIGHER) ? max_range : 0;
   do {
+	  /* Sequentially iterate over test_circ_id=1...max_range until we find a
+	       * circID such that (high_bit|test_circ_id) is not already used. */
+    test_circ_id = chan->next_circ_id++;
+    if (test_circ_id == 0 || test_circ_id >= max_range) {
+      test_circ_id = 1;
+      chan->next_circ_id = 2;
+    }
+
     if (++attempts > MAX_CIRCID_ATTEMPTS) {
       /* Make sure we don't loop forever because all circuit IDs are used.
        *
@@ -568,11 +580,16 @@ circuit_handle_first_hop(origin_circuit_t *circ)
             fmt_addrport(&firsthop->extend_info->addr,
                          firsthop->extend_info->port));
 
-  n_chan = channel_get_for_extend(firsthop->extend_info->identity_digest,
-                                  &firsthop->extend_info->ed_identity,
-                                  &firsthop->extend_info->addr,
-                                  &msg,
-                                  &should_launch);
+  if(get_options()->ChannelType != CHANNEL_TYPE_PCTCP) {
+    n_chan = channel_get_for_extend(firsthop->extend_info->identity_digest,
+                                    &firsthop->extend_info->ed_identity,
+                                    &firsthop->extend_info->addr,
+                                    &msg,
+                                    &should_launch);
+  } else {
+      n_chan = NULL;
+      should_launch = 1;
+  }
 
   if (!n_chan) {
     /* not currently connected in a useful way. */
@@ -604,10 +621,11 @@ circuit_handle_first_hop(origin_circuit_t *circ)
   } else { /* it's already open. use it. */
     tor_assert(!circ->base_.n_hop);
     circ->base_.n_chan = n_chan;
+    channel_add_circuit(n_chan, TO_CIRCUIT(circ), TO_CIRCUIT(circ)->n_circ_id);
     log_debug(LD_CIRC,"Conn open. Delivering first onion skin.");
     if ((err_reason = circuit_send_next_onion_skin(circ)) < 0) {
       log_info(LD_CIRC,"circuit_send_next_onion_skin failed.");
-      circ->base_.n_chan = NULL;
+      //circ->base_.n_chan = NULL;
       return err_reason;
     }
   }
@@ -626,6 +644,8 @@ circuit_handle_first_hop(origin_circuit_t *circ)
 void
 circuit_n_chan_done(channel_t *chan, int status, int close_origin_circuits)
 {
+  (void)close_origin_circuits;
+  
   smartlist_t *pending_circs;
   int err_reason = 0;
 
@@ -662,16 +682,17 @@ circuit_n_chan_done(channel_t *chan, int status, int close_origin_circuits)
         circuit_mark_for_close(circ, END_CIRC_REASON_CHANNEL_CLOSED);
         continue;
       }
-      if (close_origin_circuits && CIRCUIT_IS_ORIGIN(circ)) {
-        log_info(LD_CIRC,"Channel deprecated for origin circs; closing circ.");
-        circuit_mark_for_close(circ, END_CIRC_REASON_CHANNEL_CLOSED);
-        continue;
-      }
+      // if (close_origin_circuits && CIRCUIT_IS_ORIGIN(circ)) {
+      //   log_info(LD_CIRC,"Channel deprecated for origin circs; closing circ.");
+      //   circuit_mark_for_close(circ, END_CIRC_REASON_CHANNEL_CLOSED);
+      //   continue;
+      // }
       log_debug(LD_CIRC, "Found circ, sending create cell.");
       /* circuit_deliver_create_cell will set n_circ_id and add us to
        * chan_circuid_circuit_map, so we don't need to call
        * set_circid_chan here. */
       circ->n_chan = chan;
+      channel_add_circuit(chan, circ, circ->n_circ_id);
       extend_info_free(circ->n_hop);
       circ->n_hop = NULL;
 
@@ -1316,11 +1337,16 @@ circuit_extend(cell_t *cell, circuit_t *circ)
            "(by Ed25519 ID).");
   }
 
-  n_chan = channel_get_for_extend((const char*)ec.node_id,
-                                  &ec.ed_pubkey,
-                                  &ec.orport_ipv4.addr,
-                                  &msg,
-                                  &should_launch);
+  if(get_options()->ChannelType != CHANNEL_TYPE_PCTCP) {
+    n_chan = channel_get_for_extend((const char*)ec.node_id,
+                                    &ec.ed_pubkey,
+                                    &ec.orport_ipv4.addr,
+                                    &msg,
+                                    &should_launch);
+  } else {
+    n_chan = NULL;
+    should_launch = 1;
+  }
 
   if (!n_chan) {
     log_debug(LD_CIRC|LD_OR,"Next router (%s): %s",
@@ -1362,6 +1388,7 @@ circuit_extend(cell_t *cell, circuit_t *circ)
 
   tor_assert(!circ->n_hop); /* Connection is already established. */
   circ->n_chan = n_chan;
+  channel_add_circuit(n_chan, circ, circ->n_circ_id);
   log_debug(LD_CIRC,
             "n_chan is %s",
             channel_get_canonical_remote_descr(n_chan));

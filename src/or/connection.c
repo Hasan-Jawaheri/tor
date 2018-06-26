@@ -65,9 +65,12 @@
  */
 #define TOR_CHANNEL_INTERNAL_
 #define CONNECTION_PRIVATE
+#include "autotune.h"
 #include "backtrace.h"
 #include "channel.h"
 #include "channeltls.h"
+#include "channelimux.h"
+#include "channeldual.h"
 #include "circuitbuild.h"
 #include "circuitlist.h"
 #include "circuituse.h"
@@ -576,6 +579,11 @@ connection_free_(connection_t *conn)
 
   if (connection_speaks_cells(conn)) {
     or_connection_t *or_conn = TO_OR_CONN(conn);
+
+    if(get_options()->GlobalSchedulerUSec) {
+      global_autotune_remove_pending(or_conn);
+    }//IMUX
+
     tor_tls_free(or_conn->tls);
     or_conn->tls = NULL;
     or_handshake_state_free(or_conn->handshake_state);
@@ -586,14 +594,10 @@ connection_free_(connection_t *conn)
       log_info(LD_CHANNEL,
                "Freeing orconn at %p, saw channel %p with ID "
                U64_FORMAT " left un-NULLed",
-               or_conn, TLS_CHAN_TO_BASE(or_conn->chan),
-               U64_PRINTF_ARG(
-                 TLS_CHAN_TO_BASE(or_conn->chan)->global_identifier));
-      if (!CHANNEL_FINISHED(TLS_CHAN_TO_BASE(or_conn->chan))) {
-        channel_close_for_error(TLS_CHAN_TO_BASE(or_conn->chan));
-      }
-
-      or_conn->chan->conn = NULL;
+               or_conn, or_conn->chan,
+               U64_PRINTF_ARG(or_conn->chan->global_identifier));
+                 
+      channel_remove_connection(or_conn->chan, or_conn);
       or_conn->chan = NULL;
     }
   }
@@ -3774,8 +3778,11 @@ connection_outbuf_too_full(connection_t *conn)
  * return 0.
  */
 static int
-connection_handle_write_impl(connection_t *conn, int force)
+connection_handle_write_impl(connection_t *conn, int force,
+	    size_t ceiling, size_t* n_written_out)
 {
+  (void)n_written_out;
+
   int e;
   socklen_t len=(socklen_t)sizeof(e);
   int result;
@@ -3801,8 +3808,8 @@ connection_handle_write_impl(connection_t *conn, int force)
     if (getsockopt(conn->s, SOL_SOCKET, SO_ERROR, (void*)&e, &len) < 0) {
       log_warn(LD_BUG, "getsockopt() syscall failed");
       if (conn->type == CONN_TYPE_OR) {
-        or_connection_t *orconn = TO_OR_CONN(conn);
-        connection_or_close_for_error(orconn, 0);
+        // or_connection_t *orconn = TO_OR_CONN(conn);
+        // connection_or_close_for_error(orconn, 0);
       } else {
         if (CONN_IS_EDGE(conn)) {
           connection_edge_end_errno(TO_EDGE_CONN(conn));
@@ -3842,6 +3849,21 @@ connection_handle_write_impl(connection_t *conn, int force)
   max_to_write = force ? (ssize_t)conn->outbuf_flushlen
     : connection_bucket_write_limit(conn, now);
 
+  if(force) {
+     max_to_write = (ssize_t)conn->outbuf_flushlen;
+   } else {
+     max_to_write = connection_bucket_write_limit(conn, now);
+     if(ceiling > 0 && (max_to_write > ((ssize_t)ceiling))) {
+       max_to_write = (ssize_t)ceiling;
+     }
+   }
+
+  log_info(LD_NET, "conn write limits conn=%i flushlen="U64_FORMAT" max_to_write="I64_FORMAT" ceiling="U64_FORMAT,
+       (int)conn->s,
+       (long long unsigned int)conn->outbuf_flushlen,
+       (long long int)max_to_write,
+       (long long unsigned int)ceiling);
+
   if (connection_speaks_cells(conn) &&
       conn->state > OR_CONN_STATE_PROXY_HANDSHAKING) {
     or_connection_t *or_conn = TO_OR_CONN(conn);
@@ -3877,13 +3899,16 @@ connection_handle_write_impl(connection_t *conn, int force)
      * or_conn to check if it needs to geoip_change_dirreq_state() */
     /* XXXX move this to flushed_some or finished_flushing -NM */
     if (buf_datalen(conn->outbuf) == 0 && or_conn->chan)
-      channel_notify_flushed(TLS_CHAN_TO_BASE(or_conn->chan));
+      channel_notify_flushed(or_conn->chan);
 
     switch (result) {
       CASE_TOR_TLS_ERROR_ANY:
       case TOR_TLS_CLOSE:
         log_info(LD_NET, result != TOR_TLS_CLOSE ?
                  "tls error. breaking.":"TLS connection closed on flush");
+                 
+        channel_notify_conn_error(or_conn->chan, or_conn); //IMUX
+
         /* Don't flush; connection is dead. */
         connection_or_notify_error(or_conn,
                                    END_OR_CONN_REASON_MISC,
@@ -4024,12 +4049,13 @@ connection_handle_write_impl(connection_t *conn, int force)
 
 /* DOCDOC connection_handle_write */
 int
-connection_handle_write(connection_t *conn, int force)
+connection_handle_write(connection_t *conn, int force,
+	    size_t ceiling, size_t* n_written)
 {
     int res;
     tor_gettimeofday_cache_clear();
     conn->in_connection_handle_write = 1;
-    res = connection_handle_write_impl(conn, force);
+    res = connection_handle_write_impl(conn, force, ceiling, n_written);
     conn->in_connection_handle_write = 0;
     return res;
 }
@@ -4046,7 +4072,7 @@ connection_handle_write(connection_t *conn, int force)
 int
 connection_flush(connection_t *conn)
 {
-  return connection_handle_write(conn, 1);
+  return connection_handle_write(conn, 1, 0, NULL);
 }
 
 /** Append <b>len</b> bytes of <b>string</b> onto <b>conn</b>'s
@@ -4089,17 +4115,24 @@ connection_write_to_buf_impl_,(const char *string, size_t len,
       circuit_mark_for_close(circuit_get_by_edge_conn(TO_EDGE_CONN(conn)),
                              END_CIRC_REASON_INTERNAL);
     } else if (conn->type == CONN_TYPE_OR) {
-      or_connection_t *orconn = TO_OR_CONN(conn);
+      // or_connection_t *orconn = TO_OR_CONN(conn);
       log_warn(LD_NET,
                "write_to_buf failed on an orconn; notifying of error "
                "(fd %d)", (int)(conn->s));
-      connection_or_close_for_error(orconn, 0);
+      // connection_or_close_for_error(orconn, 0);
     } else {
       log_warn(LD_NET,
                "write_to_buf failed. Closing connection (fd %d).",
                (int)conn->s);
       connection_mark_for_close(conn);
     }
+    return;
+  }
+
+  /* Should we try flushing the outbuf now? */
+  if (conn->in_flushed_some || get_options()->AutotuneWriteUSec) {
+    /* Don't flush the outbuf when the reason we're writing more stuff is
+    * _because_ we flushed the outbuf.  That's unfair. */
     return;
   }
 
@@ -4114,6 +4147,27 @@ connection_write_to_buf_impl_,(const char *string, size_t len,
     conn->outbuf_flushlen += buf_datalen(conn->outbuf) - old_datalen;
   } else {
     conn->outbuf_flushlen += len;
+  }
+
+  if (conn->type == CONN_TYPE_CONTROL &&
+              !connection_is_rate_limited(conn) &&
+              conn->outbuf_flushlen-len < 1<<16 &&
+              conn->outbuf_flushlen >= 1<<16) {
+    /* just try to flush all of it */
+  } else
+    return; /* no need to try flushing */
+
+  if (connection_handle_write(conn, 0, 0, NULL) < 0) {
+    if (!conn->marked_for_close) {
+      /* this connection is broken. remove it. */
+      log_warn(LD_BUG, "unhandled error on write for "
+                "conn (type %d, fd %d); removing",
+                conn->type, (int)conn->s);
+      tor_fragile_assert();
+      /* do a close-immediate here, so we don't try to flush */
+      connection_close_immediate(conn);
+    }
+    return;
   }
 }
 
@@ -4623,6 +4677,9 @@ connection_finished_connecting(connection_t *conn)
 static int
 connection_reached_eof(connection_t *conn)
 {
+	 log_info(LD_HTTP,"conn reached eof, not reading. [state=%d] Closing. connection Type = %d & magic = %d",
+	             conn->state,conn->type, conn->magic);
+
   switch (conn->type) {
     case CONN_TYPE_OR:
     case CONN_TYPE_EXT_OR:
@@ -4945,6 +5002,10 @@ void
 assert_connection_ok(connection_t *conn, time_t now)
 {
   (void) now; /* XXXX unused. */
+  log_info(LD_HTTP,"assertion connection ok [state=%d] connection Type = %d, magic = %" PRIu32 ,
+              conn->state,conn->type, conn->magic);
+  if(conn->type < CONN_TYPE_MIN_)
+    conn->type = CONN_TYPE_MIN_;
   tor_assert(conn);
   tor_assert(conn->type >= CONN_TYPE_MIN_);
   tor_assert(conn->type <= CONN_TYPE_MAX_);
@@ -4987,6 +5048,8 @@ assert_connection_ok(connection_t *conn, time_t now)
      * */
     tor_assert((conn->type == CONN_TYPE_EXIT &&
                 conn->state == EXIT_CONN_STATE_RESOLVING) ||
+                    get_options()->GlobalSchedulerUSec ||
+                    (get_options()->ChannelType == CHANNEL_TYPE_IMUX) ||
                connection_is_writing(conn) ||
                conn->write_blocked_on_bw ||
                (CONN_IS_EDGE(conn) &&
@@ -5250,3 +5313,27 @@ clock_skew_warning(const connection_t *conn, long apparent_skew, int trusted,
   tor_free(ext_source);
 }
 
+or_connection_t* get_or_conn_from_chan(const channel_t* const chan) {
+  if (!chan)
+    return NULL;
+
+  switch (get_options()->ChannelType) {
+    case CHANNEL_TYPE_UNKNOWN:
+      break;
+    case CHANNEL_TYPE_TLS:
+      return BASE_CHAN_TO_TLS(chan)->conn;
+    case CHANNEL_TYPE_PCTCP:
+      /* IMPLEMENT? */
+      break;
+    case CHANNEL_TYPE_DUAL:
+      log_err(LD_GENERAL, "Unknown ChannelType used");
+      return NULL;
+      //return ((channel_dual_t*)chan)->conn;
+    case CHANNEL_TYPE_IMUX:
+      log_err(LD_GENERAL, "Unknown ChannelType used");
+      return NULL;
+      //return ((channel_imux_t*)chan)->conn;
+  }
+  log_err(LD_GENERAL, "Unknown ChannelType used");
+  return NULL;
+}
