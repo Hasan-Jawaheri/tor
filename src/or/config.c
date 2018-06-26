@@ -636,6 +636,7 @@ static config_var_t option_vars_[] = {
 
   /* parameters for different channel types */
   V(ChannelType,    UINT,   "1"),                   //  TLS=1  DUAL=2  PCTCP=3  IMUX=4
+  V(UsingQuic,      UINT,   "0"),
 
   V(DualSwitchAtExit,   BOOL,   "1"),
   V(DualEwmaAlpha,  DOUBLE, "0.18"),
@@ -653,6 +654,11 @@ static config_var_t option_vars_[] = {
   V(IMUXConnLimitThreshold, DOUBLE, "0.9"),
   //Lamiaa adding config value for web/bulk client
   V(IMUXTrafficType, INT, "1"), // Web =1	Bulk =2
+
+  // Quictor mod
+  VAR("ForceEntryNode",  STRING,   ForceEntryNode,  NULL),
+  VAR("ForceMiddleNode", STRING,   ForceMiddleNode, NULL),
+  VAR("ForceExitNode",   STRING,   ForceExitNode,   NULL),
 
   END_OF_CONFIG_VARS
 };
@@ -3272,6 +3278,20 @@ options_validate(or_options_t *old_options, or_options_t *options,
     options->ExcludeExitNodesUnion_ = routerset_new();
     routerset_union(options->ExcludeExitNodesUnion_,options->ExcludeExitNodes);
     routerset_union(options->ExcludeExitNodesUnion_,options->ExcludeNodes);
+  }
+
+  if (options->UsingQuic) {
+    const char *cert_path = getenv("QUICTOR_CERT_PATH");
+    const char *key_path = getenv("QUICTOR_KEY_PATH");
+
+    if (!cert_path || !key_path) {
+      REJECT("UsingQuic is enabled but missing Quicsock certificate or key (QUICTOR_CERT_PATH or QUICTOR_KEY_PATH environment variables)");
+    }
+
+    log_notice(LD_GENERAL, "Using Quicsock library! cert=%s, key=%s",
+      cert_path ? cert_path : "(null)", key_path ? key_path : "(null");
+
+    qs_init(cert_path, key_path);
   }
 
   if (options->NodeFamilies) {

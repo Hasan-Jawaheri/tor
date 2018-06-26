@@ -131,6 +131,7 @@ chunk_new_with_alloc_size(size_t alloc)
 {
   chunk_t *ch;
   ch = tor_malloc(alloc);
+  ch->stream_id = 0;
   ch->next = NULL;
   ch->datalen = 0;
 #ifdef DEBUG_CHUNK_ALLOC
@@ -506,6 +507,77 @@ buf_get_total_allocation(void)
   return total_bytes_allocated_in_chunks;
 }
 
+// Read to buf for QUIC
+static inline int
+read_to_chunk_quic(buf_t *buf, chunk_t *chunk, tor_quicsock_t fd, size_t at_most,
+              int *reached_eof, int *socket_error)
+{
+  (void) socket_error;
+
+  ssize_t read_result;
+  if (at_most > CHUNK_REMAINING_CAPACITY(chunk)) {
+    at_most = CHUNK_REMAINING_CAPACITY(chunk);
+  }
+
+  read_result = qs_recv(fd, CHUNK_WRITE_PTR(chunk), at_most);
+
+  if (read_result == -2) {
+    // nothing more to read; not EOF though
+    return 0;
+  } else if (read_result == -1) {
+    // problem
+    return -1;
+  } else if (read_result == 0) {
+    log_debug(LD_NET,"Encountered eof on fd %d", qs_get_fd(fd));
+    *reached_eof = 1;
+    return 0;
+  } else { /* actually got bytes. */
+    buf->datalen += read_result;
+    chunk->datalen += read_result;
+    log_debug(LD_NET,"Read %ld bytes. %d on inbuf.", (long)read_result,
+              (int)buf->datalen);
+    tor_assert(read_result < INT_MAX);
+    return (int)read_result;
+  }
+}
+int
+read_to_buf_quic(tor_quicsock_t s, size_t at_most, buf_t *buf, int *reached_eof,
+            int *socket_error)
+{
+  int r = 0;
+  size_t total_read = 0;
+
+  check();
+  tor_assert(reached_eof);
+  tor_assert(QUICSOCK_OK(s));
+
+  while (at_most > total_read) {
+    size_t readlen = at_most - total_read;
+    chunk_t *chunk;
+    if (!buf->tail || CHUNK_REMAINING_CAPACITY(buf->tail) < MIN_READ_LEN) {
+      chunk = buf_add_chunk_with_capacity(buf, at_most, 1);
+      if (readlen > chunk->memlen)
+        readlen = chunk->memlen;
+    } else {
+      size_t cap = CHUNK_REMAINING_CAPACITY(buf->tail);
+      chunk = buf->tail;
+      if (cap < readlen)
+        readlen = cap;
+    }
+
+    r = read_to_chunk_quic(buf, chunk, s, readlen, reached_eof, socket_error);
+    check();
+    if (r < 0)
+      return r; /* Error */
+    tor_assert(total_read+r < INT_MAX);
+    total_read += r;
+    if ((size_t)r < readlen) { /* eof, block, or no more to read. */
+      break;
+    }
+  }
+  return (int)total_read;
+}
+
 /** Read up to <b>at_most</b> bytes from the socket <b>fd</b> into
  * <b>chunk</b> (which must be on <b>buf</b>). If we get an EOF, set
  * *<b>reached_eof</b> to 1.  Return -1 on error, 0 on eof or blocking,
@@ -631,6 +703,78 @@ flush_chunk(tor_socket_t s, buf_t *buf, chunk_t *chunk, size_t sz,
   }
 }
 
+// QUIC specific helper functions
+void
+print_cell_to_log(char *buf, ssize_t len) {
+  char *str = (char*)malloc(len);
+  for (int i = 0; i< len; i++) {
+    if (buf[i] == '\0') {
+      str[i] = '\n';
+    } else {
+      str[i] = buf[i];
+    }
+  }
+
+  log_debug(LD_NET, "**** QUIC trying to write this (raw): ****");
+  log_debug(LD_NET, "%s", str);
+  log_debug(LD_NET, "******************************************");
+
+  free(str);
+}
+
+/* TODO possibly merge the send calls */
+static inline int
+flush_chunk_quic(tor_quicsock_t s, buf_t *buf, chunk_t *chunk, size_t sz) {
+  ssize_t write_result;
+  if (sz > chunk->datalen)
+    sz = chunk->datalen;
+  //print_cell_to_log(chunk->data, sz);
+  write_result = qs_send(s, chunk->data, sz, chunk->stream_id);
+  if (write_result < 0) {
+    log_warn(LD_NET,"QUIC write failed, returning.");
+    return -1;
+  } else {
+	  buf_drain(buf, write_result);
+    tor_assert(write_result < INT_MAX);
+    return (int)write_result;
+  }
+}
+
+
+int
+flush_buf_quic(tor_quicsock_t s, buf_t *buf, size_t sz) {
+  tor_assert(QUICSOCK_OK(s));
+
+  int r;
+  size_t flushed = 0;
+  int count = 0;
+
+  check();
+  while (sz) {
+    size_t flushlen0;
+    tor_assert(buf->head);
+    if (buf->head->datalen >= sz)
+      flushlen0 = sz;
+    else
+      flushlen0 = buf->head->datalen;
+
+    r = flush_chunk_quic(s, buf, buf->head, flushlen0);
+
+    check();
+    if (r < 0 || (size_t)r != flushlen0) {
+      log_debug(LD_OR, "returning -1, r = %d", r);
+      return -1;
+    }
+
+    flushed += r;
+    sz -= r;
+    count++;
+  }
+
+  tor_assert(flushed < INT_MAX);
+  return (int)flushed;
+}
+
 /** Write data from <b>buf</b> to the socket <b>s</b>.  Write at most
  * <b>sz</b> bytes, decrement *<b>buf_flushlen</b> by
  * the number of bytes actually written, and remove the written bytes
@@ -675,6 +819,37 @@ buf_flush_to_socket(buf_t *buf, tor_socket_t s, size_t sz,
   }
   tor_assert(flushed < INT_MAX);
   return (int)flushed;
+}
+
+// QUIC's write to buffer
+int
+write_to_buf_quic(const char *string, size_t string_len, buf_t *buf,
+             quicsock_stream_id_t stream_id)
+{
+  (void) stream_id;
+
+  if (!string_len)
+    return (int)buf->datalen;
+  check();
+
+  while (string_len) {
+    size_t copy;
+    if (!buf->tail || !CHUNK_REMAINING_CAPACITY(buf->tail))
+      buf_add_chunk_with_capacity(buf, string_len, 1);
+
+    copy = CHUNK_REMAINING_CAPACITY(buf->tail);
+    if (copy > string_len)
+      copy = string_len;
+    memcpy(CHUNK_WRITE_PTR(buf->tail), string, copy);
+    string_len -= copy;
+    string += copy;
+    buf->datalen += copy;
+    buf->tail->datalen += copy;
+  }
+
+  check();
+  tor_assert(buf->datalen < INT_MAX);
+  return (int)buf->datalen;
 }
 
 /** Append <b>string_len</b> bytes from <b>string</b> to the end of
@@ -764,6 +939,10 @@ buf_get_bytes(buf_t *buf, char *string, size_t string_len)
  * <b>buf_out</b>, and modify *<b>buf_flushlen</b> appropriately.
  * Return the number of bytes actually copied.
  */
+/* QUIC MOD: since this function is only used for linked_conn, we can
+ * safely assume that stream_id is not very useful since data never goes
+ * to the network layer!
+ * */
 int
 buf_move_to_buf(buf_t *buf_out, buf_t *buf_in, size_t *buf_flushlen)
 {
