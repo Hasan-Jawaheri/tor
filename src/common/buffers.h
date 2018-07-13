@@ -43,6 +43,14 @@ int buf_read_from_socket(buf_t *buf, tor_socket_t s, size_t at_most,
 int buf_flush_to_socket(buf_t *buf, tor_socket_t s, size_t sz,
                         size_t *buf_flushlen);
 
+void print_cell_to_log(char *buf, ssize_t len);
+int read_to_buf_quic(tor_quicsock_t s, size_t at_most, buf_t *buf, int *reached_eof,
+                int *socket_error);
+int flush_buf_quic(tor_quicsock_t s, buf_t *buf, size_t sz);
+int write_to_buf_quic(const char *string, size_t string_len, buf_t *buf,
+                      quicsock_stream_id_t stream_id);
+#define generic_buffer_add_quic(b,dat,len,stream) write_to_buf_quic((dat),(len),(b),(stream))
+
 int buf_add(buf_t *buf, const char *string, size_t string_len);
 void buf_add_string(buf_t *buf, const char *string);
 void buf_add_printf(buf_t *buf, const char *format, ...)
@@ -88,6 +96,9 @@ typedef struct chunk_t {
 #endif
   char *data; /**< A pointer to the first byte of data stored in <b>mem</b>. */
   uint32_t inserted_time; /**< Timestamp when this chunk was inserted. */
+  quicsock_stream_id_t stream_id; /** QUIC mod: the stream ID passed to QUIC,
+                                   *  will be 0 we are not using QUIC or it is
+                                   *  not a relayed cell */
   char mem[FLEXIBLE_ARRAY_MEMBER]; /**< The actual memory used for storage in
                 * this chunk. */
 } chunk_t;

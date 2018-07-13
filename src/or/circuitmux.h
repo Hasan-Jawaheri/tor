@@ -60,6 +60,9 @@ struct circuitmux_policy_s {
   /* Optional: channel comparator for use by the scheduler */
   int (*cmp_cmux)(circuitmux_t *cmux_1, circuitmux_policy_data_t *pol_data_1,
                   circuitmux_t *cmux_2, circuitmux_policy_data_t *pol_data_2);
+
+  double (*get_next_priority)(circuitmux_t *cmux,
+                                         circuitmux_policy_data_t *pol_data);
 };
 
 /*
@@ -157,6 +160,8 @@ void circuitmux_mark_destroyed_circids_usable(circuitmux_t *cmux,
 /* Optional interchannel comparisons for scheduling */
 MOCK_DECL(int, circuitmux_compare_muxes,
           (circuitmux_t *cmux_1, circuitmux_t *cmux_2));
+
+or_connection_t *circuitmux_choose_orconn(smartlist_t *orconn_filter);
 
 #endif /* !defined(TOR_CIRCUITMUX_H) */
 

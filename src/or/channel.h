@@ -38,9 +38,12 @@ typedef enum {
  * to a particular node, and once constructed support the abstract operations
  * defined below.
  */
-struct channel_s {
+typedef struct channel_s {
   /** Magic number for type-checking cast macros */
   uint32_t magic;
+
+  /* type of channel */
+  channel_type_t type;
 
   /** List entry for hashtable for global-identifier lookup. */
   HT_ENTRY(channel_s) gidmap_node;
@@ -226,11 +229,11 @@ struct channel_s {
   /* Ask the lower layer how many cells can be written */
   int (*num_cells_writeable)(channel_t *);
   /* Write a cell to an open channel */
-  int (*write_cell)(channel_t *, cell_t *);
+  int (*write_cell)(channel_t *, cell_t *, circuit_t *);
   /** Write a packed cell to an open channel */
-  int (*write_packed_cell)(channel_t *, packed_cell_t *);
+  int (*write_packed_cell)(channel_t *, or_connection_t *conn, circuit_t *, packed_cell_t *);
   /** Write a variable-length cell to an open channel */
-  int (*write_var_cell)(channel_t *, var_cell_t *);
+  int (*write_var_cell)(channel_t *, var_cell_t *, circuit_t *);
 
   /**
    * Hash of the public RSA key for the other side's RSA identity key -- or
@@ -272,6 +275,8 @@ struct channel_s {
   /* DOCDOC */
   unsigned wide_circ_ids:1;
 
+  circid_t next_circ_id;
+
   /** For how many circuits are we n_chan?  What about p_chan? */
   unsigned int num_n_circuits, num_p_circuits;
 
@@ -307,6 +312,9 @@ struct channel_s {
   time_t timestamp_client; /* Client used this, according to relay.c */
   time_t timestamp_recv; /* Cell received from lower layer */
   time_t timestamp_xmit; /* Cell sent to lower layer */
+  
+  /* Timestamp for relay.c */
+   time_t timestamp_last_added_nonpadding;
 
   /** Timestamp for run_connection_housekeeping(). We update this once a
    * second when we run housekeeping and find a circuit on this channel, and
@@ -321,7 +329,7 @@ struct channel_s {
   /** Channel counters for cell channels */
   uint64_t n_cells_recved, n_bytes_recved;
   uint64_t n_cells_xmitted, n_bytes_xmitted;
-};
+} channel_t;
 
 struct channel_listener_s {
   /* Current channel listener state */
@@ -388,7 +396,8 @@ channel_listener_state_to_string(channel_listener_state_t state);
 /* Abstract channel operations */
 
 void channel_mark_for_close(channel_t *chan);
-int channel_write_packed_cell(channel_t *chan, packed_cell_t *cell);
+int channel_write_packed_cell(channel_t *chan, or_connection_t *conn,
+        circuit_t *circ, packed_cell_t *cell);
 
 void channel_listener_mark_for_close(channel_listener_t *chan_l);
 
@@ -524,7 +533,8 @@ int channel_send_destroy(circid_t circ_id, channel_t *chan,
 
 channel_t * channel_connect(const tor_addr_t *addr, uint16_t port,
                             const char *rsa_id_digest,
-                            const ed25519_public_key_t *ed_id);
+                            const ed25519_public_key_t *ed_id,
+                            channel_type_t type);
 
 channel_t * channel_get_for_extend(const char *rsa_id_digest,
                                    const ed25519_public_key_t *ed_id,
@@ -541,6 +551,10 @@ int channel_is_better(channel_t *a, channel_t *b);
 channel_t * channel_find_by_global_id(uint64_t global_identifier);
 channel_t * channel_find_by_remote_identity(const char *rsa_id_digest,
                                             const ed25519_public_key_t *ed_id);
+int channel_get_num_channels(void); //IMUX
+int channel_get_num_total_connections(void); // IMUX
+void channel_notify_conn_error(channel_t *chan, or_connection_t *conn); // IMUX
+void channel_remove_circuit(channel_t *chan, circid_t circid); // IMUX
 
 /** For things returned by channel_find_by_remote_digest(), walk the list.
  * The RSA key will match for all returned elements; the Ed25519 key might not.
@@ -606,6 +620,7 @@ void channel_clear_client(channel_t *chan);
 int channel_matches_extend_info(channel_t *chan, extend_info_t *extend_info);
 int channel_matches_target_addr_for_extend(channel_t *chan,
                                            const tor_addr_t *target);
+void channel_add_circuit(channel_t *chan, circuit_t *circ, circid_t circid);
 unsigned int channel_num_circuits(channel_t *chan);
 MOCK_DECL(void,channel_set_circid_type,(channel_t *chan,
                                         crypto_pk_t *identity_rcvd,
@@ -620,6 +635,22 @@ void channel_listener_dump_transport_statistics(channel_listener_t *chan_l,
 void channel_check_for_duplicates(void);
 
 void channel_update_bad_for_new_circs(const char *digest, int force);
+
+void channel_start_writing(channel_t *chan);
+
+/* Things for connection_or.c to call back into */
+//ssize_t channel_flush_some_cells(channel_t *chan, ssize_t num_cells);
+channel_t *channel_handle_incoming(or_connection_t *orconn, channel_type_t type);
+void channel_handle_cell(cell_t *cell, or_connection_t *conn);
+void channel_handle_state_change_on_orconn(channel_t *chan, or_connection_t *conn,
+                                               uint8_t old_state, uint8_t state);
+void channel_handle_var_cell(var_cell_t *var_cell, or_connection_t *conn);
+void channel_add_connection(channel_t *chan, or_connection_t *conn);
+void channel_remove_connection(channel_t *chan, or_connection_t *conn);
+void channel_connection_closing(channel_t *chan, or_connection_t *conn);
+void channel_run_all_housekeeping(time_t now, int check_expiring);
+void channel_run_connection_housekeeping(channel_t *chan, or_connection_t *conn, time_t now);
+
 
 /* Flow control queries */
 int channel_num_cells_writeable(channel_t *chan);

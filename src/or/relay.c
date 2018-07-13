@@ -51,6 +51,7 @@
 #include "backtrace.h"
 #include "buffers.h"
 #include "channel.h"
+#include "channeltls.h"
 #include "circpathbias.h"
 #include "circuitbuild.h"
 #include "circuitlist.h"
@@ -2070,9 +2071,15 @@ connection_edge_package_raw_inbuf(edge_connection_t *conn, int package_partial,
     connection_buf_get_bytes(payload, length, TO_CONN(conn));
   }
 
-  log_debug(domain,TOR_SOCKET_T_FORMAT": Packaging %d bytes (%d waiting).",
-            conn->base_.s,
+  if (conn->base_.use_quic) {
+    log_info(domain,"quic_sock %d: Packaging %d bytes (%d waiting).",
+            (int)qs_get_fd(conn->base_.q_sock),
             (int)length, (int)connection_get_inbuf_len(TO_CONN(conn)));
+  } else {
+    log_debug(domain,TOR_SOCKET_T_FORMAT": Packaging %d bytes (%d waiting).",
+              conn->base_.s,
+              (int)length, (int)connection_get_inbuf_len(TO_CONN(conn)));
+  }
 
   if (sending_optimistically && !sending_from_optimistic) {
     /* This is new optimistic data; remember it in case we need to detach and
@@ -2475,12 +2482,16 @@ cell_queue_append(cell_queue_t *queue, packed_cell_t *cell)
 void
 cell_queue_append_packed_copy(circuit_t *circ, cell_queue_t *queue,
                               int exitward, const cell_t *cell,
-                              int wide_circ_ids, int use_stats)
+                              int wide_circ_ids, int use_stats,
+                              streamid_t stream_id)
 {
   packed_cell_t *copy = packed_cell_copy(cell, wide_circ_ids);
   (void)circ;
   (void)exitward;
   (void)use_stats;
+
+  // QUIC mod: TEMP -> ideally add into packed_cell_copy()
+  copy->stream_id = stream_id; // 0 for most cases(void)circ;
 
   copy->inserted_timestamp = monotime_coarse_get_stamp();
 
@@ -2774,7 +2785,7 @@ set_streams_blocked_on_circ(circuit_t *circ, channel_t *chan,
 }
 
 /** Extract the command from a packed cell. */
-static uint8_t
+uint8_t
 packed_cell_get_command(const packed_cell_t *cell, int wide_circ_ids)
 {
   if (wide_circ_ids) {
@@ -2792,6 +2803,17 @@ packed_cell_get_circid(const packed_cell_t *cell, int wide_circ_ids)
     return ntohl(get_uint32(cell->body));
   } else {
     return ntohs(get_uint16(cell->body));
+  }
+}
+
+/** Extract the sequence from a packed cell. */
+uint32_t
+packed_cell_get_sequence(const packed_cell_t *cell, int wide_circ_ids)
+{
+  if (wide_circ_ids) {
+    return ntohl(get_uint32(cell->body+5));
+  } else {
+    return ntohl(get_uint32(cell->body+3));
   }
 }
 
@@ -2832,7 +2854,7 @@ channel_flush_from_first_active_circuit, (channel_t *chan, int max))
       cell = destroy_cell_to_packed_cell(dcell, chan->wide_circ_ids);
       /* Send the DESTROY cell. It is very unlikely that this fails but just
        * in case, get rid of the channel. */
-      if (channel_write_packed_cell(chan, cell) < 0) {
+      if (channel_write_packed_cell(chan, NULL, circ, cell) < 0) {
         /* The cell has been freed. */
         channel_mark_for_close(chan);
         continue;
@@ -2915,7 +2937,7 @@ channel_flush_from_first_active_circuit, (channel_t *chan, int max))
 
     /* Now send the cell. It is very unlikely that this fails but just in
      * case, get rid of the channel. */
-    if (channel_write_packed_cell(chan, cell) < 0) {
+    if (channel_write_packed_cell(chan, NULL, circ, cell) < 0) {
       /* The cell has been freed at this point. */
       channel_mark_for_close(chan);
       continue;
@@ -2969,6 +2991,7 @@ append_cell_to_circuit_queue(circuit_t *circ, channel_t *chan,
   or_circuit_t *orcirc = NULL;
   cell_queue_t *queue;
   int streams_blocked;
+  int next_seq = 0;
   int exitward;
   if (circ->marked_for_close)
     return;
@@ -2977,16 +3000,20 @@ append_cell_to_circuit_queue(circuit_t *circ, channel_t *chan,
   if (exitward) {
     queue = &circ->n_chan_cells;
     streams_blocked = circ->streams_blocked_on_n_chan;
+    next_seq = (++(circ->n_sequence));
   } else {
     orcirc = TO_OR_CIRCUIT(circ);
     queue = &orcirc->p_chan_cells;
     streams_blocked = circ->streams_blocked_on_p_chan;
+    next_seq = (++(circ->p_sequence));
   }
+
+  cell->sequence = next_seq;
 
   /* Very important that we copy to the circuit queue because all calls to
    * this function use the stack for the cell memory. */
   cell_queue_append_packed_copy(circ, queue, exitward, cell,
-                                chan->wide_circ_ids, 1);
+                                chan->wide_circ_ids, 1, fromstream);
 
   /* Check and run the OOM if needed. */
   if (PREDICT_UNLIKELY(cell_queues_check_size())) {
@@ -3010,6 +3037,17 @@ append_cell_to_circuit_queue(circuit_t *circ, channel_t *chan,
     /* This was the first cell added to the queue.  We just made this
      * circuit active. */
     log_debug(LD_GENERAL, "Made a circuit active.");
+  }
+
+  if(get_options()->GlobalSchedulerUSec) {
+    channel_start_writing(chan);
+  } else if (!channel_has_queued_writes(chan)) {
+    /* There is no data at all waiting to be sent on the outbuf.  Add a
+     * cell, so that we can notice when it gets flushed, flushed_some can
+     * get called, and we can start putting more data onto the buffer then.
+     */
+    log_debug(LD_GENERAL, "Primed a buffer.");
+    channel_flush_from_first_active_circuit(chan, 1);
   }
 
   /* New way: mark this as having waiting cells for the scheduler */

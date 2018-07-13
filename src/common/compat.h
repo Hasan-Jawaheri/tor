@@ -484,6 +484,13 @@ typedef int socklen_t;
 #define TOR_INVALID_SOCKET (-1)
 #endif /* defined(_WIN32) */
 
+// Assume libquic is always compiled in; might want to change later
+#include "quicsock/quicsock.h"
+#define tor_quicsock_t quicsock_t
+#define TOR_QUICSOCK_T_FORMAT "%p"
+#define QUICSOCK_OK(s) ((s) != NULL)
+#define TOR_INVALID_QUICSOCK NULL
+
 int tor_close_socket_simple(tor_socket_t s);
 MOCK_DECL(int, tor_close_socket, (tor_socket_t s));
 void tor_take_socket_ownership(tor_socket_t s);

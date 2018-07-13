@@ -12,6 +12,7 @@
 #ifndef TOR_OR_H
 #define TOR_OR_H
 
+#include "quicsock/quicsock.h"
 #include "orconfig.h"
 
 #ifdef HAVE_UNISTD_H
@@ -948,6 +949,18 @@ typedef enum {
 #define CELL_CREATED2 11
 #define CELL_PADDING_NEGOTIATE 12
 
+//IMUX
+#define CELL_BULK_CONN 64
+#define CELL_WEB_CONN 65
+#define CELL_CLOSING_CONN 66
+#define CELL_CLOSING_CHAN 67
+
+#define CELL_LIGHT_CONN 70
+#define CELL_HEAVY_CONN 71
+
+#define CELL_TRACK 100
+//-----
+
 #define CELL_VPADDING 128
 #define CELL_CERTS 129
 #define CELL_AUTH_CHALLENGE 130
@@ -986,7 +999,7 @@ typedef enum {
 #define CELL_PAYLOAD_SIZE 509
 /** Number of bytes in a cell transmitted over the network, in the longest
  * form */
-#define CELL_MAX_NETWORK_SIZE 514
+#define CELL_MAX_NETWORK_SIZE 518
 
 /** Maximum length of a header on a variable-length cell. */
 #define VAR_CELL_MAX_HEADER_SIZE 7
@@ -1152,9 +1165,20 @@ typedef enum {
   CHANNEL_LISTENER_STATE_LAST
 } channel_listener_state_t;
 
+// IMUX
+typedef enum {
+    CHANNEL_TYPE_UNKNOWN,
+    CHANNEL_TYPE_TLS,
+    CHANNEL_TYPE_DUAL,
+    CHANNEL_TYPE_PCTCP,
+    CHANNEL_TYPE_IMUX,
+} channel_type_t;
+
 /* TLS channel stuff */
 
 typedef struct channel_tls_s channel_tls_t;
+typedef struct channel_dual_s channel_dual_t; // IMUX
+typedef struct channel_imux_s channel_imux_t; // IMUX
 
 /* circuitmux_t typedef; struct circuitmux_s is in circuitmux.h */
 
@@ -1166,6 +1190,8 @@ typedef struct cell_t {
   circid_t circ_id; /**< Circuit which received the cell. */
   uint8_t command; /**< Type of the cell: one of CELL_PADDING, CELL_CREATE,
                     * CELL_DESTROY, etc */
+  uint32_t sequence; /**< Sequence number to allow circuits to be split
+                        * across multiple OR connections */  //IMUX
   uint8_t payload[CELL_PAYLOAD_SIZE]; /**< Cell body. */
 } cell_t;
 
@@ -1195,6 +1221,7 @@ typedef struct packed_cell_t {
   char body[CELL_MAX_NETWORK_SIZE]; /**< Cell as packed for network. */
   uint32_t inserted_timestamp; /**< Time (in timestamp units) when this cell
                                 * was inserted */
+  streamid_t stream_id; /**< The stream that we are sending on for QUIC */
 } packed_cell_t;
 
 /** A queue of cells on a circuit, waiting to be added to the
@@ -1316,7 +1343,7 @@ typedef struct connection_t {
                    * *_CONNECTION_MAGIC. */
 
   uint8_t state; /**< Current state of this connection. */
-  unsigned int type:5; /**< What kind of connection is this? */
+  int type:6; /**< What kind of connection is this? */
   unsigned int purpose:5; /**< Only used for DIR and EXIT types currently. */
 
   /* The next fields are all one-bit booleans. Some are only applicable to
@@ -1410,6 +1437,10 @@ typedef struct connection_t {
   /** Bytes written since last call to control_event_conn_bandwidth_used().
    * Only used if we're configured to emit CONN_BW events. */
   uint32_t n_written_conn_bw;
+
+	/** For QUIC SOCK usage */
+  unsigned int use_quic:1; /**< Boolean: do we use quic socket */
+	tor_quicsock_t q_sock;
 } connection_t;
 
 /** Subtype of connection_t; used for a listener socket. */
@@ -1623,7 +1654,7 @@ typedef struct or_connection_t {
    * recent, we can rate limit it further. */
 
   /* Channel using this connection */
-  channel_tls_t *chan;
+  channel_t *chan;
 
   tor_addr_t real_addr; /**< The actual address that this connection came from
                        * or went to.  The <b>addr</b> field is prone to
@@ -1680,6 +1711,24 @@ typedef struct or_connection_t {
    * bytes TLS actually sent - used for overhead estimation for scheduling.
    */
   uint64_t bytes_xmitted, bytes_xmitted_by_tls;
+
+  // IMUX
+  int globalSchedulePending;
+  struct {
+    /* most recent and current socket stats information
+     * FIXME these are not freed! */
+    struct socket_stats_t* prevstats;
+    struct socket_stats_t* currstats;
+    //    smartlist_t* expected_acks;
+    //    ssize_t predicted_acks_coming_soon;
+    /* the number of bytes the kernel would be willing to immediately flush if we sent it */
+    size_t kernel_would_flush;
+    /* the number of bytes tor should write to the kernel from this conn */
+    size_t remaining;
+    size_t written_to_kernel;
+    size_t rttmin_nsec;
+  } autotune;
+  //----
 } or_connection_t;
 
 /** Subtype of connection_t for an "edge connection" -- that is, an entry (ap)
@@ -3190,7 +3239,18 @@ typedef struct circuit_t {
   /** Hashtable node: used to look up the circuit by its HS token using the HS
       circuitmap. */
   HT_ENTRY(circuit_t) hs_circuitmap_node;
+
+  //IMUX
+  uint32_t n_sequence; /**< Keep track of sequence number to assign to cells being sent */
+  uint32_t p_sequence;
+  /** Next circuit in linked list of all circuits (global_circuitlist). */
+  TOR_LIST_ENTRY(circuit_t) head;
+  int traffic_type;
 } circuit_t;
+
+#define TRAFFIC_TYPE_UNKNOWN 0
+#define TRAFFIC_TYPE_WEB 1
+#define TRAFFIC_TYPE_BULK 2
 
 /** Largest number of relay_early cells that we can send on a given
  * circuit. */
@@ -3567,7 +3627,7 @@ static inline int node_is_good_exit(const node_t *node)
 
 static inline or_circuit_t *TO_OR_CIRCUIT(circuit_t *x)
 {
-  tor_assert(x->magic == OR_CIRCUIT_MAGIC);
+  //tor_assert(x->magic == OR_CIRCUIT_MAGIC);
   return DOWNCAST(or_circuit_t, x);
 }
 static inline const or_circuit_t *CONST_TO_OR_CIRCUIT(const circuit_t *x)
@@ -4712,6 +4772,59 @@ typedef struct {
 
   /** Autobool: Do we refuse single hop client rendezvous? */
   int DoSRefuseSingleHopClientRendezvous;
+
+  /* when autotuning, how often we add to our bucket */
+  int AutotuneRefillUSec;
+  /* when autotuning, our bucket size is how much we can send in this time */
+  int AutotuneFillLimitUSec;
+
+  int GlobalSchedulerUSec;
+
+  /** Type of channel to use between ORs -- TLS=1  DUAL=2  PCTCP=3  IMUX=4 */
+  int ChannelType;
+
+  /** whether or not to use Quic sockets */
+  int UsingQuic;
+
+  /* if set, use this as the node's bandwidth instead of auto-detecting it
+    * in bytes/sercond */
+  uint64_t AutotuneWriteBWOverride;
+
+  /* when autotuning, how often we try to write to kernel */
+  int AutotuneWriteUSec;
+
+  /****
+  * Parameters for the DUAL EWMA channel type
+  ***/
+
+  /* whether or not to only switch at the exit, or every node */
+  int DualSwitchAtExit;
+
+  /* parameters for EWMA algorithm */
+  double DualEwmaAlpha;
+  double DualEwmaBeta;
+
+  /* thresholds for when to switch from light to heavy (or inactive) */
+  double DualThresholdLight;
+  double DualThresholdHeavy;
+  double DualThresholdInactive;
+
+  int DualUseTrafficTracker;
+
+  /* options for IMUX channel scheduling */
+  int IMUXScheduleType;
+  int IMUXInitConnections;
+  int IMUXMaxConnections;
+  int IMUXSeparateBulkConnection;
+  int IMUXSeparateWebConnection;
+  double IMUXConnLimitThreshold;
+  //Lamiaa web/bulk client
+  int IMUXTrafficType;
+
+  // Quictor mod
+  char *ForceEntryNode;
+  char *ForceMiddleNode;
+  char *ForceExitNode;
 } or_options_t;
 
 #define LOG_PROTOCOL_WARN (get_protocol_warning_severity_level())

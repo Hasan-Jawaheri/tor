@@ -31,6 +31,7 @@
 #define CONNECTION_OR_PRIVATE
 #include "channel.h"
 #include "channeltls.h"
+#include "circuitlist.h"
 #include "circuitbuild.h"
 #include "circuitlist.h"
 #include "circuitstats.h"
@@ -44,6 +45,7 @@
 #include "geoip.h"
 #include "main.h"
 #include "link_handshake.h"
+#include "main.h"
 #include "microdesc.h"
 #include "networkstatus.h"
 #include "nodelist.h"
@@ -58,6 +60,8 @@
 #include "scheduler.h"
 #include "torcert.h"
 #include "channelpadding.h"
+
+static int connection_or_init_quic_connection(or_connection_t* or_conn, int started_here);
 
 static int connection_tls_finish_handshake(or_connection_t *conn);
 static int connection_or_launch_v3_or_handshake(or_connection_t *conn);
@@ -124,12 +128,9 @@ connection_or_set_identity_digest(or_connection_t *conn,
                                   const char *rsa_digest,
                                   const ed25519_public_key_t *ed_id)
 {
-  channel_t *chan = NULL;
+  channel_t *chan = conn->chan;
   tor_assert(conn);
   tor_assert(rsa_digest);
-
-  if (conn->chan)
-    chan = TLS_CHAN_TO_BASE(conn->chan);
 
   log_info(LD_HANDSHAKE, "Set identity digest for %p (%s): %s %s.",
            conn,
@@ -148,8 +149,8 @@ connection_or_set_identity_digest(or_connection_t *conn,
   const int ed_changed = ed_id_was_set &&
     (!ed_id || !ed25519_pubkey_eq(ed_id, &chan->ed25519_identity));
 
-  tor_assert(!rsa_changed || !rsa_id_was_set);
-  tor_assert(!ed_changed || !ed_id_was_set);
+  // tor_assert(!rsa_changed || !rsa_id_was_set);
+  // tor_assert(!ed_changed || !ed_id_was_set);
 
   if (!rsa_changed && !ed_changed)
     return;
@@ -157,8 +158,8 @@ connection_or_set_identity_digest(or_connection_t *conn,
   /* If the identity was set previously, remove the old mapping. */
   if (rsa_id_was_set) {
     connection_or_clear_identity(conn);
-    if (chan)
-      channel_clear_identity_digest(chan);
+    // if (chan)
+    //   channel_clear_identity_digest(chan);
   }
 
   memcpy(conn->identity_digest, rsa_digest, DIGEST_LEN);
@@ -387,8 +388,8 @@ connection_or_change_state(or_connection_t *conn, uint8_t state)
   conn->base_.state = state;
 
   if (conn->chan)
-    channel_tls_handle_state_change_on_orconn(conn->chan, conn,
-                                              old_state, state);
+    channel_handle_state_change_on_orconn(conn->chan, conn,
+                                          old_state, state);
 }
 
 /** Return the number of circuits using an or_connection_t; this used to
@@ -401,7 +402,7 @@ connection_or_get_num_circuits, (or_connection_t *conn))
   tor_assert(conn);
 
   if (conn->chan) {
-    return channel_num_circuits(TLS_CHAN_TO_BASE(conn->chan));
+    return channel_num_circuits(conn->chan);
   } else return 0;
 }
 
@@ -428,8 +429,14 @@ cell_pack(packed_cell_t *dst, const cell_t *src, int wide_circ_ids)
     set_uint16(dest, htons(src->circ_id));
     dest += 2;
   }
+
   set_uint8(dest, src->command);
-  memcpy(dest+1, src->payload, CELL_PAYLOAD_SIZE);
+  dest += 1;
+
+  set_uint32(dest, htonl(src->sequence));
+  dest += 4;
+
+  memcpy(dest, src->payload, CELL_PAYLOAD_SIZE);
 }
 
 /** Unpack the network-order buffer <b>src</b> into a host-order
@@ -445,8 +452,14 @@ cell_unpack(cell_t *dest, const char *src, int wide_circ_ids)
     dest->circ_id = ntohs(get_uint16(src));
     src += 2;
   }
+
   dest->command = get_uint8(src);
-  memcpy(dest->payload, src+1, CELL_PAYLOAD_SIZE);
+  src += 1;
+
+  dest->sequence = ntohl(get_uint32(src));
+  src += 4;
+
+  memcpy(dest->payload, src, CELL_PAYLOAD_SIZE);
 }
 
 /** Write the header of <b>cell</b> into the first VAR_CELL_MAX_HEADER_SIZE
@@ -550,7 +563,7 @@ connection_or_process_inbuf(or_connection_t *conn)
           ret = -1;
         /* Touch the channel's active timestamp if there is one */
         if (conn->chan)
-          channel_timestamp_active(TLS_CHAN_TO_BASE(conn->chan));
+          channel_timestamp_active(conn->chan);
       }
       if (ret < 0) {
         connection_or_close_for_error(conn, 0);
@@ -595,14 +608,14 @@ connection_or_flushed_some(or_connection_t *conn)
 
   /* Update the channel's active timestamp if there is one */
   if (conn->chan)
-    channel_timestamp_active(TLS_CHAN_TO_BASE(conn->chan));
+    channel_timestamp_active(conn->chan);
 
   /* If we're under the low water mark, add cells until we're just over the
    * high water mark. */
   datalen = connection_get_outbuf_len(TO_CONN(conn));
   if (datalen < OR_CONN_LOWWATER) {
     /* Let the scheduler know */
-    scheduler_channel_wants_writes(TLS_CHAN_TO_BASE(conn->chan));
+    scheduler_channel_wants_writes(conn->chan);
   }
 
   return 0;
@@ -660,7 +673,7 @@ connection_or_finished_flushing(or_connection_t *conn)
 
   /* Update the channel's active timestamp if there is one */
   if (conn->chan)
-    channel_timestamp_active(TLS_CHAN_TO_BASE(conn->chan));
+    channel_timestamp_active(conn->chan);
 
   return 0;
 }
@@ -710,13 +723,14 @@ connection_or_about_to_close(or_connection_t *or_conn)
 
   /* Tell the controlling channel we're closed */
   if (or_conn->chan) {
-    channel_closed(TLS_CHAN_TO_BASE(or_conn->chan));
+	  //IMUX
+	  channel_connection_closing(or_conn->chan, or_conn);
     /*
      * NULL this out because the channel might hang around a little
      * longer before channel_run_cleanup() gets it.
      */
-    or_conn->chan->conn = NULL;
-    or_conn->chan = NULL;
+    // or_conn->chan->conn = NULL;
+    // or_conn->chan = NULL;
   }
 
   /* Remember why we're closing this connection. */
@@ -726,7 +740,7 @@ connection_or_about_to_close(or_connection_t *or_conn)
       const or_options_t *options = get_options();
       connection_or_note_state_when_broken(or_conn);
       /* Tell the new guard API about the channel failure */
-      entry_guard_chan_failed(TLS_CHAN_TO_BASE(or_conn->chan));
+      entry_guard_chan_failed(or_conn->chan);
       if (conn->state >= OR_CONN_STATE_TLS_HANDSHAKING) {
         int reason = tls_error_to_orconn_end_reason(or_conn->tls_error);
         control_event_or_conn_status(or_conn, OR_CONN_EVENT_FAILED,
@@ -837,12 +851,12 @@ connection_or_set_canonical(or_connection_t *or_conn,
 
   or_conn->is_canonical = !! is_canonical; /* force to a 1-bit boolean */
   or_conn->idle_timeout = channelpadding_get_channel_idle_timeout(
-          TLS_CHAN_TO_BASE(or_conn->chan), is_canonical);
+          or_conn->chan, is_canonical);
 
   log_info(LD_CIRC,
           "Channel " U64_FORMAT " chose an idle timeout of %d.",
           or_conn->chan ?
-          U64_PRINTF_ARG(TLS_CHAN_TO_BASE(or_conn->chan)->global_identifier):0,
+          U64_PRINTF_ARG(or_conn->chan->global_identifier):0,
           or_conn->idle_timeout);
 }
 
@@ -885,7 +899,7 @@ connection_or_check_canonicity(or_connection_t *conn, int started_here)
   const ed25519_public_key_t *ed_id = NULL;
   const tor_addr_t *addr = &conn->real_addr;
   if (conn->chan)
-    ed_id = & TLS_CHAN_TO_BASE(conn->chan)->ed25519_identity;
+    ed_id = & conn->chan->ed25519_identity;
 
   const node_t *r = node_get_by_id(id_digest);
   if (r &&
@@ -951,7 +965,7 @@ connection_or_is_bad_for_new_circs(or_connection_t *or_conn)
   tor_assert(or_conn);
 
   if (or_conn->chan)
-    return channel_is_bad_for_new_circs(TLS_CHAN_TO_BASE(or_conn->chan));
+    return channel_is_bad_for_new_circs(or_conn->chan);
   else return 0;
 }
 
@@ -961,7 +975,7 @@ connection_or_mark_bad_for_new_circs(or_connection_t *or_conn)
   tor_assert(or_conn);
 
   if (or_conn->chan)
-    channel_mark_bad_for_new_circs(TLS_CHAN_TO_BASE(or_conn->chan));
+    channel_mark_bad_for_new_circs(or_conn->chan);
 }
 
 /** How old do we let a connection to an OR get before deciding it's
@@ -1065,8 +1079,8 @@ connection_or_group_set_badness_(smartlist_t *group, int force)
     }
 
     if (!best ||
-        channel_is_better(TLS_CHAN_TO_BASE(or_conn->chan),
-                          TLS_CHAN_TO_BASE(best->chan))) {
+        channel_is_better(or_conn->chan,
+                          best->chan)) {
       best = or_conn;
     }
   } SMARTLIST_FOREACH_END(or_conn);
@@ -1094,8 +1108,8 @@ connection_or_group_set_badness_(smartlist_t *group, int force)
         or_conn->base_.state != OR_CONN_STATE_OPEN)
       continue;
     if (or_conn != best &&
-        channel_is_better(TLS_CHAN_TO_BASE(best->chan),
-                          TLS_CHAN_TO_BASE(or_conn->chan))) {
+        channel_is_better(best->chan,
+                          or_conn->chan)) {
       /* This isn't the best conn, _and_ the best conn is better than it */
       if (best->is_canonical) {
         log_info(LD_OR,
@@ -1369,11 +1383,13 @@ connection_or_notify_error(or_connection_t *conn,
 
   /* Tell the controlling channel if we have one */
   if (conn->chan) {
-    chan = TLS_CHAN_TO_BASE(conn->chan);
+    chan = conn->chan;
+    //IMUX
+    channel_connection_closing(chan, conn);
     /* Don't transition if we're already in closing, closed or error */
-    if (!CHANNEL_CONDEMNED(chan)) {
-      channel_close_for_error(chan);
-    }
+    // if (!CHANNEL_CONDEMNED(chan)) {
+    //   channel_close_for_error(chan);
+    // }
   }
 
   /* No need to mark for error because connection.c is about to do that */
@@ -1399,7 +1415,7 @@ MOCK_IMPL(or_connection_t *,
 connection_or_connect, (const tor_addr_t *_addr, uint16_t port,
                         const char *id_digest,
                         const ed25519_public_key_t *ed_id,
-                        channel_tls_t *chan))
+                        channel_t *chan))
 {
   or_connection_t *conn;
   const or_options_t *options = get_options();
@@ -1426,6 +1442,7 @@ connection_or_connect, (const tor_addr_t *_addr, uint16_t port,
   }
 
   conn = or_connection_new(CONN_TYPE_OR, tor_addr_family(&addr));
+  conn->base_.use_quic = get_options()->UsingQuic;
 
   /*
    * Set up conn so it's got all the data we need to remember for channels
@@ -1435,7 +1452,9 @@ connection_or_connect, (const tor_addr_t *_addr, uint16_t port,
    * keep the channel up to date.
    */
   conn->chan = chan;
-  chan->conn = conn;
+  //IMUX
+  channel_add_connection(chan, conn);
+
   connection_or_init_conn_from_address(conn, &addr, port, id_digest, ed_id, 1);
 
   /* We have a proper OR connection setup, now check if we can connect to it
@@ -1512,6 +1531,9 @@ connection_or_connect, (const tor_addr_t *_addr, uint16_t port,
       connection_watch_events(TO_CONN(conn), READ_EVENT | WRITE_EVENT);
       /* writable indicates finish, readable indicates broken link,
          error indicates broken link on windows */
+      if (conn->base_.use_quic) {
+        connection_or_init_quic_connection(conn, 1);
+      }
       return conn;
     /* case 1: fall through */
   }
@@ -1540,17 +1562,18 @@ connection_or_connect, (const tor_addr_t *_addr, uint16_t port,
 void
 connection_or_close_normally(or_connection_t *orconn, int flush)
 {
-  channel_t *chan = NULL;
+  // channel_t *chan = NULL;
 
   tor_assert(orconn);
   if (flush) connection_mark_and_flush_internal(TO_CONN(orconn));
   else connection_mark_for_close_internal(TO_CONN(orconn));
   if (orconn->chan) {
-    chan = TLS_CHAN_TO_BASE(orconn->chan);
-    /* Don't transition if we're already in closing, closed or error */
-    if (!CHANNEL_CONDEMNED(chan)) {
-      channel_close_from_lower_layer(chan);
-    }
+	  channel_connection_closing(orconn->chan, orconn);
+    // chan = TLS_CHAN_TO_BASE(orconn->chan);
+    // /* Don't transition if we're already in closing, closed or error */
+    // if (!CHANNEL_CONDEMNED(chan)) {
+    //   channel_close_from_lower_layer(chan);
+    // }
   }
 }
 
@@ -1567,10 +1590,17 @@ connection_or_close_for_error,(or_connection_t *orconn, int flush))
   if (flush) connection_mark_and_flush_internal(TO_CONN(orconn));
   else connection_mark_for_close_internal(TO_CONN(orconn));
   if (orconn->chan) {
-    chan = TLS_CHAN_TO_BASE(orconn->chan);
+    chan = orconn->chan;
     /* Don't transition if we're already in closing, closed or error */
-    if (!CHANNEL_CONDEMNED(chan)) {
-      channel_close_for_error(chan);
+    // if (!CHANNEL_CONDEMNED(chan)) {
+    //   channel_close_for_error(chan);
+    // }
+
+    //IMUX
+    if (!(chan->state == CHANNEL_STATE_CLOSING ||
+             chan->state == CHANNEL_STATE_CLOSED ||
+             chan->state == CHANNEL_STATE_ERROR)) {
+      channel_connection_closing(orconn->chan, orconn);
     }
   }
 }
@@ -1599,7 +1629,8 @@ connection_tls_start_handshake,(or_connection_t *conn, int receiving))
       chan_listener = channel_tls_start_listener();
       command_setup_listener(chan_listener);
     }
-    chan = channel_tls_handle_incoming(conn);
+    //IMUX
+    chan = channel_handle_incoming(conn, get_options()->ChannelType);
     channel_listener_queue_incoming(chan_listener, chan);
   }
 
@@ -1804,7 +1835,7 @@ connection_or_check_valid_tls_handshake(or_connection_t *conn,
   }
 
   tor_assert(conn->chan);
-  channel_set_circid_type(TLS_CHAN_TO_BASE(conn->chan), identity_rcvd, 1);
+  channel_set_circid_type(conn->chan, identity_rcvd, 1);
 
   crypto_pk_free(identity_rcvd);
 
@@ -1851,8 +1882,7 @@ connection_or_client_learned_peer_id(or_connection_t *conn,
                                      const ed25519_public_key_t *ed_peer_id)
 {
   const or_options_t *options = get_options();
-  channel_tls_t *chan_tls = conn->chan;
-  channel_t *chan = channel_tls_to_base(chan_tls);
+  channel_t *chan = conn->chan;
   int changed_identity = 0;
   tor_assert(chan);
 
@@ -1956,7 +1986,7 @@ connection_or_client_learned_peer_id(or_connection_t *conn,
            expected_rsa, expected_ed, seen_rsa, seen_ed, extra_log);
 
     /* Tell the new guard API about the channel failure */
-    entry_guard_chan_failed(TLS_CHAN_TO_BASE(conn->chan));
+    entry_guard_chan_failed(conn->chan);
     control_event_or_conn_status(conn, OR_CONN_EVENT_FAILED,
                                  END_OR_CONN_REASON_OR_IDENTITY);
     if (!authdir_mode_tests_reachability(options))
@@ -1999,7 +2029,7 @@ connection_or_client_used(or_connection_t *conn)
   tor_assert(conn);
 
   if (conn->chan) {
-    return channel_when_last_client(TLS_CHAN_TO_BASE(conn->chan));
+    return channel_when_last_client(conn->chan);
   } else return 0;
 }
 
@@ -2203,7 +2233,7 @@ connection_or_set_state_open(or_connection_t *conn)
   /* Link protocol 3 appeared in Tor 0.2.3.6-alpha, so any connection
    * that uses an earlier link protocol should not be treated as a relay. */
   if (conn->link_proto < 3) {
-    channel_mark_client(TLS_CHAN_TO_BASE(conn->chan));
+    channel_mark_client(conn->chan);
   }
 
   or_handshake_state_free(conn->handshake_state);
@@ -2236,9 +2266,9 @@ connection_or_write_cell_to_buf(const cell_t *cell, or_connection_t *conn)
 
   /* Touch the channel's active timestamp if there is one */
   if (conn->chan) {
-    channel_timestamp_active(TLS_CHAN_TO_BASE(conn->chan));
+    channel_timestamp_active(conn->chan);
 
-    if (TLS_CHAN_TO_BASE(conn->chan)->currently_padding) {
+    if (conn->chan->currently_padding) {
       rep_hist_padding_count_write(PADDING_TYPE_ENABLED_TOTAL);
       if (cell->command == CELL_PADDING)
         rep_hist_padding_count_write(PADDING_TYPE_ENABLED_CELL);
@@ -2270,7 +2300,7 @@ connection_or_write_var_cell_to_buf,(const var_cell_t *cell,
 
   /* Touch the channel's active timestamp if there is one */
   if (conn->chan)
-    channel_timestamp_active(TLS_CHAN_TO_BASE(conn->chan));
+    channel_timestamp_active(conn->chan);
 }
 
 /** See whether there's a variable-length cell waiting on <b>or_conn</b>'s
@@ -2319,10 +2349,10 @@ connection_or_process_cells_from_inbuf(or_connection_t *conn)
 
       /* Touch the channel's active timestamp if there is one */
       if (conn->chan)
-        channel_timestamp_active(TLS_CHAN_TO_BASE(conn->chan));
+        channel_timestamp_active(conn->chan);
 
       circuit_build_times_network_is_live(get_circuit_build_times_mutable());
-      channel_tls_handle_var_cell(var_cell, conn);
+      channel_handle_var_cell(var_cell, conn);
       var_cell_free(var_cell);
     } else {
       const int wide_circ_ids = conn->wide_circ_ids;
@@ -2335,7 +2365,7 @@ connection_or_process_cells_from_inbuf(or_connection_t *conn)
 
       /* Touch the channel's active timestamp if there is one */
       if (conn->chan)
-        channel_timestamp_active(TLS_CHAN_TO_BASE(conn->chan));
+        channel_timestamp_active(conn->chan);
 
       circuit_build_times_network_is_live(get_circuit_build_times_mutable());
       connection_buf_get_bytes(buf, cell_network_size, TO_CONN(conn));
@@ -2344,7 +2374,7 @@ connection_or_process_cells_from_inbuf(or_connection_t *conn)
        * network-order string) */
       cell_unpack(&cell, buf, wide_circ_ids);
 
-      channel_tls_handle_cell(&cell, conn);
+      channel_handle_cell(&cell, conn);
     }
   }
 }
@@ -2559,7 +2589,7 @@ connection_or_send_certs_cell(or_connection_t *conn)
   certs_cell = certs_cell_new();
 
   /* Start adding certs.  First the link cert or auth1024 cert. */
-  if (conn_in_server_mode) {
+  if (own_link_cert) {
     tor_assert_nonfatal(own_link_cert);
     add_x509_cert(certs_cell,
                   OR_CERT_TYPE_TLS_LINK, own_link_cert);
@@ -2812,7 +2842,7 @@ connection_or_compute_authenticate_cell_body(or_connection_t *conn,
     crypto_digest_get_digest(client_d, (char*)auth->clog, 32);
   }
 
-  {
+  if (!TO_CONN(conn)->use_quic) {
     /* Digest of cert used on TLS link : 32 octets. */
     tor_x509_cert_t *cert = NULL;
     if (server) {
@@ -2833,15 +2863,17 @@ connection_or_compute_authenticate_cell_body(or_connection_t *conn,
   }
 
   /* HMAC of clientrandom and serverrandom using master key : 32 octets */
-  if (old_tlssecrets_algorithm) {
-    tor_tls_get_tlssecrets(conn->tls, auth->tlssecrets);
-  } else {
-    char label[128];
-    tor_snprintf(label, sizeof(label),
-                 "EXPORTER FOR TOR TLS CLIENT BINDING %s", authtype_str);
-    tor_tls_export_key_material(conn->tls, auth->tlssecrets,
-                                auth->cid, sizeof(auth->cid),
-                                label);
+  if (!TO_CONN(conn)->use_quic) {
+    if (old_tlssecrets_algorithm) {
+      tor_tls_get_tlssecrets(conn->tls, auth->tlssecrets);
+    } else {
+      char label[128];
+      tor_snprintf(label, sizeof(label),
+                  "EXPORTER FOR TOR TLS CLIENT BINDING %s", authtype_str);
+      tor_tls_export_key_material(conn->tls, auth->tlssecrets,
+                                  auth->cid, sizeof(auth->cid),
+                                  label);
+    }
   }
 
   /* 8 octets were reserved for the current time, but we're trying to get out
@@ -2980,3 +3012,48 @@ connection_or_send_authenticate_cell,(or_connection_t *conn, int authtype))
   return 0;
 }
 
+int connection_or_accepted_quic_connection(or_connection_t* or_conn) {
+  channel_listener_t *chan_listener;
+  channel_t *chan;
+
+  control_event_or_conn_status(or_conn, OR_CONN_EVENT_NEW, 0);
+
+  /* Incoming connections will need a new channel passed to the
+  * channel_tls_listener */
+  tor_assert(!(or_conn->chan));
+  chan_listener = channel_tls_get_listener();
+  if (!chan_listener) {
+    chan_listener = channel_tls_start_listener();
+    command_setup_listener(chan_listener);
+  }
+  chan = channel_handle_incoming(or_conn, get_options()->ChannelType);
+  channel_listener_queue_incoming(chan_listener, chan);
+
+  return connection_or_init_quic_connection(or_conn, 0);
+}
+
+static int connection_or_init_quic_connection(or_connection_t* or_conn, int started_here) {
+  connection_t* conn = TO_CONN(or_conn);
+
+  or_conn->tls = tor_tls_new(-1, 1 - started_here);
+  if (!or_conn->tls) {
+    log_warn(LD_BUG,"tor_tls_new failed. Closing.");
+    return -1;
+  }
+
+  tor_tls_set_logged_address(or_conn->tls, // XXX client and relay?
+      escaped_safe_str(conn->address));
+
+  connection_start_writing(conn);
+  connection_start_reading(conn);
+
+  circuit_build_times_network_is_live(get_circuit_build_times_mutable());
+
+  connection_or_change_state(or_conn, OR_CONN_STATE_OR_HANDSHAKING_V3);
+  connection_init_or_handshake_state(or_conn, started_here);
+  if (started_here) {
+    connection_or_send_versions(or_conn, 1);
+  }
+
+  return 0;
+}

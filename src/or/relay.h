@@ -61,7 +61,8 @@ void cell_queue_clear(cell_queue_t *queue);
 void cell_queue_append(cell_queue_t *queue, packed_cell_t *cell);
 void cell_queue_append_packed_copy(circuit_t *circ, cell_queue_t *queue,
                                    int exitward, const cell_t *cell,
-                                   int wide_circ_ids, int use_stats);
+                                   int wide_circ_ids, int use_stats,
+                                   streamid_t stream_id);
 
 void append_cell_to_circuit_queue(circuit_t *circ, channel_t *chan,
                                   cell_t *cell, cell_direction_t direction,
@@ -93,7 +94,9 @@ void stream_choice_seed_weak_rng(void);
 int relay_crypt(circuit_t *circ, cell_t *cell, cell_direction_t cell_direction,
                 crypt_path_t **layer_hint, char *recognized);
 
+uint8_t packed_cell_get_command(const packed_cell_t *cell, int wide_circ_ids);
 circid_t packed_cell_get_circid(const packed_cell_t *cell, int wide_circ_ids);
+uint32_t packed_cell_get_sequence(const packed_cell_t *cell, int wide_circ_ids);
 
 #ifdef RELAY_PRIVATE
 STATIC int connected_cell_parse(const relay_header_t *rh, const cell_t *cell,

@@ -12,6 +12,7 @@
 #include "buffers.h"
 #define TOR_CHANNEL_INTERNAL_
 #include "channeltls.h"
+#include "connection.h"
 
 #include <event2/event.h>
 
@@ -714,8 +715,8 @@ scheduler_bug_occurred(const channel_t *chan)
   char buf[128];
 
   if (chan != NULL) {
-    const size_t outbuf_len =
-      buf_datalen(TO_CONN(BASE_CHAN_TO_TLS((channel_t *) chan)->conn)->outbuf);
+    or_connection_t* orconn = get_or_conn_from_chan(chan);
+    const size_t outbuf_len = buf_datalen(TO_CONN(orconn)->outbuf);
     tor_snprintf(buf, sizeof(buf),
                  "Channel %" PRIu64 " in state %s and scheduler state %s."
                  " Num cells on cmux: %d. Connection outbuf len: %lu.",

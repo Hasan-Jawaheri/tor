@@ -48,6 +48,7 @@
 
 #define MAIN_PRIVATE
 #include "or.h"
+#include "autotune.h"
 #include "addressmap.h"
 #include "backtrace.h"
 #include "bridges.h"
@@ -280,10 +281,17 @@ int
 connection_add_impl(connection_t *conn, int is_connecting)
 {
   tor_assert(conn);
-  tor_assert(SOCKET_OK(conn->s) ||
-             conn->linked ||
-             (conn->type == CONN_TYPE_AP &&
-              TO_EDGE_CONN(conn)->is_dns_request));
+  if(conn->use_quic)
+    tor_assert((conn->use_quic && QUICSOCK_OK(conn->q_sock)) ||
+               SOCKET_OK(conn->s) ||
+               conn->linked ||
+               (conn->type == CONN_TYPE_AP &&
+                TO_EDGE_CONN(conn)->is_dns_request));
+  else
+    tor_assert(SOCKET_OK(conn->s) ||
+              conn->linked ||
+              (conn->type == CONN_TYPE_AP &&
+                TO_EDGE_CONN(conn)->is_dns_request));
 
   tor_assert(conn->conn_array_index == -1); /* can only connection_add once */
   conn->conn_array_index = smartlist_len(connection_array);
@@ -291,17 +299,31 @@ connection_add_impl(connection_t *conn, int is_connecting)
 
   (void) is_connecting;
 
-  if (SOCKET_OK(conn->s) || conn->linked) {
-    conn->read_event = tor_event_new(tor_libevent_get_base(),
-         conn->s, EV_READ|EV_PERSIST, conn_read_callback, conn);
-    conn->write_event = tor_event_new(tor_libevent_get_base(),
-         conn->s, EV_WRITE|EV_PERSIST, conn_write_callback, conn);
-    /* XXXX CHECK FOR NULL RETURN! */
-  }
+  if (conn->use_quic) {
+    int fd = qs_get_fd(conn->q_sock);
+    tor_assert(tor_libevent_get_base() != NULL);
+    tor_assert(conn->q_sock != NULL);
 
-  log_debug(LD_NET,"new conn type %s, socket %d, address %s, n_conns %d.",
-            conn_type_to_string(conn->type), (int)conn->s, conn->address,
-            smartlist_len(connection_array));
+    if (QUICSOCK_OK(conn->q_sock) || conn->linked) {
+      conn->read_event = tor_event_new(tor_libevent_get_base(),
+            fd, EV_READ|EV_PERSIST, conn_read_callback, conn);
+      conn->write_event = tor_event_new(tor_libevent_get_base(),
+                  fd, EV_WRITE|EV_PERSIST, conn_write_callback, conn);
+            /* XXXX CHECK FOR NULL RETURN! */
+    }
+  } else {
+    if (SOCKET_OK(conn->s) || conn->linked) {
+      conn->read_event = tor_event_new(tor_libevent_get_base(),
+          conn->s, EV_READ|EV_PERSIST, conn_read_callback, conn);
+      conn->write_event = tor_event_new(tor_libevent_get_base(),
+          conn->s, EV_WRITE|EV_PERSIST, conn_write_callback, conn);
+      /* XXXX CHECK FOR NULL RETURN! */
+    }
+
+    log_debug(LD_NET,"new conn type %s, socket %d, address %s, n_conns %d.",
+              conn_type_to_string(conn->type), (int)conn->s, conn->address,
+              smartlist_len(connection_array));
+  }
 
   return 0;
 }
@@ -312,12 +334,12 @@ connection_unregister_events(connection_t *conn)
 {
   if (conn->read_event) {
     if (event_del(conn->read_event))
-      log_warn(LD_BUG, "Error removing read event for %d", (int)conn->s);
+        log_warn(LD_BUG, "Error removing read event for %d", conn->use_quic ? (int)qs_get_fd(conn->q_sock) : conn->s);
     tor_free(conn->read_event);
   }
   if (conn->write_event) {
     if (event_del(conn->write_event))
-      log_warn(LD_BUG, "Error removing write event for %d", (int)conn->s);
+        log_warn(LD_BUG, "Error removing write event for %d", conn->use_quic ? (int)qs_get_fd(conn->q_sock) : conn->s);
     tor_free(conn->write_event);
   }
   if (conn->type == CONN_TYPE_AP_DNS_LISTENER) {
@@ -338,7 +360,7 @@ connection_remove(connection_t *conn)
   tor_assert(conn);
 
   log_debug(LD_NET,"removing socket %d (type %s), n_conns now %d",
-            (int)conn->s, conn_type_to_string(conn->type),
+            conn->use_quic ? (int)qs_get_fd(conn->q_sock) : conn->s, conn_type_to_string(conn->type),
             smartlist_len(connection_array));
 
   if (conn->type == CONN_TYPE_AP && conn->socket_family == AF_UNIX) {
@@ -349,6 +371,11 @@ connection_remove(connection_t *conn)
 
   tor_assert(conn->conn_array_index >= 0);
   current_index = conn->conn_array_index;
+
+  if(get_options()->GlobalSchedulerUSec && connection_speaks_cells(conn)) {
+    global_autotune_remove_pending(TO_OR_CONN(conn));
+  }
+
   connection_unregister_events(conn); /* This is redundant, but cheap. */
   if (current_index == smartlist_len(connection_array)-1) { /* at the end */
     smartlist_del(connection_array, current_index);
@@ -608,7 +635,7 @@ connection_stop_reading,(connection_t *conn))
     if (event_del(conn->read_event))
       log_warn(LD_NET, "Error from libevent setting read event state for %d "
                "to unwatched: %s",
-               (int)conn->s,
+    	         conn->use_quic ? (int)qs_get_fd(conn->q_sock) : conn->s,
                tor_socket_strerror(tor_socket_errno(conn->s)));
   }
 }
@@ -631,7 +658,7 @@ connection_start_reading,(connection_t *conn))
     if (event_add(conn->read_event, NULL))
       log_warn(LD_NET, "Error from libevent setting read event state for %d "
                "to watched: %s",
-               (int)conn->s,
+    	         conn->use_quic ? (int)qs_get_fd(conn->q_sock) : conn->s,
                tor_socket_strerror(tor_socket_errno(conn->s)));
   }
 }
@@ -664,7 +691,7 @@ connection_stop_writing,(connection_t *conn))
     if (event_del(conn->write_event))
       log_warn(LD_NET, "Error from libevent setting write event state for %d "
                "to unwatched: %s",
-               (int)conn->s,
+    	         conn->use_quic ? (int)qs_get_fd(conn->q_sock) : conn->s,
                tor_socket_strerror(tor_socket_errno(conn->s)));
   }
 }
@@ -685,11 +712,17 @@ connection_start_writing,(connection_t *conn))
         connection_should_read_from_linked_conn(conn->linked_conn))
       connection_start_reading_from_linked_conn(conn->linked_conn);
   } else {
-    if (event_add(conn->write_event, NULL))
-      log_warn(LD_NET, "Error from libevent setting write event state for %d "
-               "to watched: %s",
-               (int)conn->s,
-               tor_socket_strerror(tor_socket_errno(conn->s)));
+    if (event_add(conn->write_event, NULL)) {
+    	if (conn->use_quic) {
+        log_warn(LD_NET, "Error from libevent setting write event state for %d",
+                (int)qs_get_fd(conn->q_sock));
+      } else {
+        log_warn(LD_NET, "Error from libevent setting write event state for %d "
+                "to watched: %s",
+                (int)conn->s,
+                tor_socket_strerror(tor_socket_errno(conn->s)));
+      }
+    }
   }
 }
 
@@ -873,7 +906,13 @@ conn_read_callback(evutil_socket_t fd, short event, void *_conn)
   (void)fd;
   (void)event;
 
-  log_debug(LD_NET,"socket %d wants to read.",(int)conn->s);
+  if (conn->use_quic) {
+    tor_assert(conn->q_sock);
+    log_debug(LD_NET,"Got a callback on a quic-enabled socket %d: type %d, purpose: %d",
+              (int)qs_get_fd(conn->q_sock), conn->type, conn->purpose);
+  } else {
+    log_debug(LD_NET,"socket %d wants to read.",conn->s);
+  }
 
   /* assert_connection_ok(conn, time(NULL)); */
 
@@ -905,12 +944,33 @@ conn_write_callback(evutil_socket_t fd, short events, void *_conn)
   (void)fd;
   (void)events;
 
-  LOG_FN_CONN(conn, (LOG_DEBUG, LD_NET, "socket %d wants to write.",
-                     (int)conn->s));
+  /* check if the connection is an OR connection */
+  const or_options_t* opts = get_options();
+  if((opts->GlobalSchedulerUSec || opts->AutotuneWriteUSec)
+      && connection_speaks_cells(conn)) {
+    global_autotune_conn_write_callback(TO_OR_CONN(conn));
+  } else {
+    write_to_connection(conn, 0, NULL);
+  }
+}
+
+
+size_t
+write_to_connection(connection_t *conn, size_t ceiling, int* has_error) {
+
+  if (conn->use_quic) {
+    tor_assert(conn->q_sock);
+    log_debug(LD_NET,"Got a write callback on a quic-enabled socket %d: type %d, purpose: %d",
+                  (int)qs_get_fd(conn->q_sock), conn->type, conn->purpose);
+  } else {
+    LOG_FN_CONN(conn, (LOG_DEBUG, LD_NET, "socket %d wants to write. ceiling is "U64_FORMAT,
+                      (int)conn->s, ((long long unsigned int)ceiling)));
+  }
 
   /* assert_connection_ok(conn, time(NULL)); */
 
-  if (connection_handle_write(conn, 0) < 0) {
+  size_t n_written = 0;
+  if (connection_handle_write(conn, 0, ceiling, &n_written) < 0) {
     if (!conn->marked_for_close) {
       /* this connection is broken. remove it. */
       log_fn(LOG_WARN,LD_BUG,
@@ -927,11 +987,16 @@ conn_write_callback(evutil_socket_t fd, short events, void *_conn)
       connection_close_immediate(conn); /* So we don't try to flush. */
       connection_mark_for_close(conn);
     }
+    if(has_error) {
+      *has_error = 1;
+    }
   }
   assert_connection_ok(conn, time(NULL));
 
   if (smartlist_len(closeable_connection_lst))
     close_closeable_connections();
+
+  return n_written;
 }
 
 /** If the connection at connection_array[i] is marked for close, then:
@@ -1200,12 +1265,9 @@ run_connection_housekeeping(int i, time_t now)
   /* If we haven't flushed to an OR connection for a while, then either nuke
      the connection or send a keepalive, depending. */
 
-  or_conn = TO_OR_CONN(conn);
+  chan = or_conn->chan;
   tor_assert(conn->outbuf);
-
-  chan = TLS_CHAN_TO_BASE(or_conn->chan);
-  tor_assert(chan);
-
+  
   if (channel_num_circuits(chan) != 0) {
     have_any_circuits = 1;
     chan->timestamp_last_had_circuits = now;
@@ -1213,7 +1275,7 @@ run_connection_housekeeping(int i, time_t now)
     have_any_circuits = 0;
   }
 
-  if (channel_is_bad_for_new_circs(TLS_CHAN_TO_BASE(or_conn->chan)) &&
+  if (channel_is_bad_for_new_circs(or_conn->chan) &&
       ! have_any_circuits) {
     /* It's bad for new circuits, and has no unmarked circuits on it:
      * mark it now. */
@@ -1606,10 +1668,13 @@ run_scheduled_events(time_t now)
   }
 
   /* 5. We do housekeeping for each connection... */
-  channel_update_bad_for_new_circs(NULL, 0);
-  int i;
-  for (i=0;i<smartlist_len(connection_array);i++) {
-    run_connection_housekeeping(i, now);
+  if (0) { //IMUX
+    channel_run_all_housekeeping(now, 1);
+
+    int i;
+    for (i=0;i<smartlist_len(connection_array);i++) {
+      run_connection_housekeeping(i, now);
+    }
   }
 
   /* 6. And remove any marked circuits... */
@@ -3506,6 +3571,7 @@ tor_free_all(int postfork)
   smartlist_free(connection_array);
   smartlist_free(closeable_connection_lst);
   smartlist_free(active_linked_connection_lst);
+  global_autotune_free();
   periodic_timer_free(second_timer);
   teardown_periodic_events();
   periodic_timer_free(refill_timer);

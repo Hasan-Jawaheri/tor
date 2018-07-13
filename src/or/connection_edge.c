@@ -654,9 +654,9 @@ connection_ap_about_to_close(entry_connection_t *entry_conn)
     dnsserv_reject_request(entry_conn);
   }
 
-  if (TO_CONN(edge_conn)->state == AP_CONN_STATE_CIRCUIT_WAIT) {
-    smartlist_remove(pending_entry_connections, entry_conn);
-  }
+  // if (TO_CONN(edge_conn)->state == AP_CONN_STATE_CIRCUIT_WAIT) {
+  //   smartlist_remove(pending_entry_connections, entry_conn);
+  // }
 
 #if 1
   /* Check to make sure that this isn't in pending_entry_connections if it
@@ -920,7 +920,7 @@ connection_ap_attach_pending(int retry)
       continue;
     }
     if (conn->state != AP_CONN_STATE_CIRCUIT_WAIT) {
-      log_warn(LD_BUG, "%p is no longer in circuit_wait. Its current state "
+      log_info(LD_BUG, "%p is no longer in circuit_wait. Its current state "
                "is %s. Why is it on pending_entry_connections?",
                entry_conn,
                conn_state_to_string(conn->type, conn->state));
@@ -2761,9 +2761,15 @@ connection_ap_handshake_send_begin,(entry_connection_t *ap_conn))
   edge_conn->package_window = STREAMWINDOW_START;
   edge_conn->deliver_window = STREAMWINDOW_START;
   base_conn->state = AP_CONN_STATE_CONNECT_WAIT;
-  log_info(LD_APP,"Address/port sent, ap socket "TOR_SOCKET_T_FORMAT
-           ", n_circ_id %u",
-           base_conn->s, (unsigned)circ->base_.n_circ_id);
+  if (base_conn->use_quic) {
+    log_info(LD_APP,"QUIC: Address/port sent, ap socket %d"
+            ", n_circ_id %u", qs_get_fd(base_conn->q_sock),
+            (unsigned)circ->base_.n_circ_id);
+  } else {
+    log_info(LD_APP,"Address/port sent, ap socket "TOR_SOCKET_T_FORMAT
+            ", n_circ_id %u",
+            base_conn->s, (unsigned)circ->base_.n_circ_id);
+  }
   control_event_stream_status(ap_conn, STREAM_EVENT_SENT_CONNECT, 0);
 
   /* If there's queued-up data, send it now */
@@ -2937,7 +2943,7 @@ connection_ap_make_link(connection_t *partner,
 
   /* attaching to a dirty circuit is fine */
   connection_ap_mark_as_pending_circuit(conn);
-  log_info(LD_APP,"... application connection created and linked.");
+  log_info(LD_APP,"... application connection created and linked. state : %d", base_conn->state);
   return conn;
 }
 
