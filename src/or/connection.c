@@ -1198,13 +1198,7 @@ connection_listener_new_quic(const struct sockaddr *listensockaddr,
     q_sock = qs_open();
 
     if (!QUICSOCK_OK(q_sock)) {
-      int e = tor_socket_errno(s);
-      if (ERRNO_IS_RESOURCE_LIMIT(e)) {
-        warn_too_many_conns();
-      } else {
-        log_warn(LD_NET, "QUIC Socket creation failed: %s",
-                 tor_socket_strerror(e));
-      }
+      log_warn(LD_NET, "QUIC Socket creation failed: %p", q_sock);
       goto err;
     }
 

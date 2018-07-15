@@ -278,7 +278,7 @@ hs_get_time_period_num(time_t now)
    * publication */
   unsigned int time_period_rotation_offset = sr_state_get_phase_duration();
   time_period_rotation_offset /= 60; /* go from seconds to minutes */
-  tor_assert(minutes_since_epoch > time_period_rotation_offset);
+  //tor_assert(minutes_since_epoch > time_period_rotation_offset);
   minutes_since_epoch -= time_period_rotation_offset;
 
   /* Calculate the time period */

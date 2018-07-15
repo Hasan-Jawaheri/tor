@@ -1264,6 +1264,9 @@ run_connection_housekeeping(int i, time_t now)
 
   /* If we haven't flushed to an OR connection for a while, then either nuke
      the connection or send a keepalive, depending. */
+     
+  or_conn = TO_OR_CONN(conn);
+  tor_assert(conn->outbuf);
 
   chan = or_conn->chan;
   tor_assert(conn->outbuf);

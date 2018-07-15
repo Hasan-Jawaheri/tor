@@ -492,6 +492,8 @@ circuit_establish_circuit(uint8_t purpose, extend_info_t *exit_ei, int flags)
     return NULL;
   }
 
+  log_notice(LD_CIRC, "[circuit_establish][%p]", circ);
+
   control_event_circuit_status(circ, CIRC_EVENT_LAUNCHED, 0);
 
   if ((err_reason = circuit_handle_first_hop(circ)) < 0) {
@@ -1049,7 +1051,7 @@ circuit_build_no_more_hops(origin_circuit_t *circ)
    * I think I got them right, but more checking would be wise. -NM
    */
 
-  log_info(LD_CIRC,"circuit built!");
+  log_notice(LD_CIRC, "[circuit_built][%p]", circ);
   circuit_reset_failure_count(0);
 
   if (circ->build_state->onehop_tunnel || circ->has_opened) {
