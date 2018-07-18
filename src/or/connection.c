@@ -5771,8 +5771,6 @@ void
 assert_connection_ok(connection_t *conn, time_t now)
 {
   (void) now; /* XXXX unused. */
-  log_info(LD_HTTP,"assertion connection ok [state=%d] connection Type = %d, magic = %" PRIu32 ,
-              conn->state,conn->type, conn->magic);
   if(conn->type < CONN_TYPE_MIN_)
     conn->type = CONN_TYPE_MIN_;
 

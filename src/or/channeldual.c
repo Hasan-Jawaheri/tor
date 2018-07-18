@@ -329,20 +329,16 @@ channel_dual_free_method(channel_t *chan)
   tor_assert(chan);
 
   channel_dual_t *dualchan = BASE_CHAN_TO_DUAL(chan);
+  
+  dualchan->lightconn = NULL;
+  dualchan->heavyconn = NULL;
 
-  channel_dual_conn_entry_t lookup, *ent;
-  log_warn(LD_CHANNEL, "freeing dualchan %p at address %s", dualchan, fmt_addr(&(dualchan->addr)));
-
-  tor_addr_copy(&lookup.addr, &(dualchan->addr));
-  lookup.port = dualchan->port;
-  ent = HT_FIND(channel_map, &channel_by_addr, &lookup);
-
-  if(ent) {
-      HT_REMOVE(channel_map, &channel_by_addr, ent);
-      tor_free(ent);
-  } else {
-    log_warn(LD_CHANNEL, "could not find channel for %s to close (%p)", fmt_addr(&(dualchan->addr)), dualchan);
+  SMARTLIST_FOREACH_BEGIN(dualchan->connections, or_connection_t *, conn)
+  {
+    conn->chan = NULL;
   }
+  SMARTLIST_FOREACH_END(conn);
+  smartlist_clear(dualchan->connections);
 }
 
 /*********
@@ -393,9 +389,12 @@ channel_dual_close_method(channel_t *chan)
 
   tor_assert(dualchan);
 
-
-  if(dualchan->lightconn) connection_or_close_normally(dualchan->lightconn, 1);
-  if(dualchan->heavyconn) connection_or_close_normally(dualchan->heavyconn, 1);
+  SMARTLIST_FOREACH_BEGIN(dualchan->connections, or_connection_t *, conn)
+  {
+    connection_or_close_normally(conn, 1);
+    conn->chan = NULL;
+  }
+  SMARTLIST_FOREACH_END(conn);
 
   channel_dual_conn_entry_t lookup, *ent;
 
@@ -526,38 +525,42 @@ channel_dual_get_remote_descr_method(channel_t *chan, int flags)
   tor_assert(smartlist_len(dualchan->connections));
 
   conn = TO_CONN((or_connection_t *)smartlist_get(dualchan->connections, 0));
+  if (!conn) {
+    strlcpy(buf, "(No connection)", sizeof(buf));
+    answer = buf;
+  } else {
+    switch (flags) {
+      case 0:
+        /* Canonical address with port*/
+        tor_snprintf(buf, MAX_DESCR_LEN + 1,
+                    "%s:%u", conn->address, conn->port);
+        answer = buf;
+        break;
+      case GRD_FLAG_ORIGINAL:
+        /* Actual address with port */
+        addr_str = tor_addr_to_str_dup(&(dualchan->addr));
+        tor_snprintf(buf, MAX_DESCR_LEN + 1,
+                    "%s:%u", addr_str, conn->port);
+        tor_free(addr_str);
+        answer = buf;
+        break;
+      case GRD_FLAG_ADDR_ONLY:
+        /* Canonical address, no port */
+        strlcpy(buf, conn->address, sizeof(buf));
+        answer = buf;
+        break;
+      case GRD_FLAG_ORIGINAL|GRD_FLAG_ADDR_ONLY:
+        /* Actual address, no port */
+        addr_str = tor_addr_to_str_dup(&(dualchan->addr));
+        strlcpy(buf, addr_str, sizeof(buf));
+        tor_free(addr_str);
+        answer = buf;
+        break;
 
-  switch (flags) {
-    case 0:
-      /* Canonical address with port*/
-      tor_snprintf(buf, MAX_DESCR_LEN + 1,
-                   "%s:%u", conn->address, conn->port);
-      answer = buf;
-      break;
-    case GRD_FLAG_ORIGINAL:
-      /* Actual address with port */
-      addr_str = tor_addr_to_str_dup(&(dualchan->addr));
-      tor_snprintf(buf, MAX_DESCR_LEN + 1,
-                   "%s:%u", addr_str, conn->port);
-      tor_free(addr_str);
-      answer = buf;
-      break;
-    case GRD_FLAG_ADDR_ONLY:
-      /* Canonical address, no port */
-      strlcpy(buf, conn->address, sizeof(buf));
-      answer = buf;
-      break;
-    case GRD_FLAG_ORIGINAL|GRD_FLAG_ADDR_ONLY:
-      /* Actual address, no port */
-      addr_str = tor_addr_to_str_dup(&(dualchan->addr));
-      strlcpy(buf, addr_str, sizeof(buf));
-      tor_free(addr_str);
-      answer = buf;
-      break;
-
-    default:
-      /* Something's broken in channel.c */
-      tor_assert(1);
+      default:
+        /* Something's broken in channel.c */
+        tor_assert(1);
+    }
   }
 
   return answer;
@@ -1120,6 +1123,9 @@ channel_dual_remove_connection(channel_t *chan, or_connection_t *conn)
 
 	channel_dual_t *dualchan = BASE_CHAN_TO_DUAL(chan);
 
+  if (!smartlist_contains(dualchan->connections, conn))
+    return;
+
 	smartlist_remove(dualchan->connections, conn);
 
 	if(dualchan->lightconn == conn) {
@@ -1136,6 +1142,10 @@ channel_dual_remove_connection(channel_t *chan, or_connection_t *conn)
 			circ->writeconn = NULL;
 		}
 	} SMARTLIST_FOREACH_END(circ);
+
+  if (chan->state == CHANNEL_STATE_CLOSING ||
+      chan->state == CHANNEL_STATE_CLOSED ||
+      chan->state == CHANNEL_STATE_ERROR) return;
 
 	or_connection_t *newconn;
 
